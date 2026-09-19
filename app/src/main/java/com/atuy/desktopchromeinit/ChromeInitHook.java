@@ -83,6 +83,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<View, Boolean> TEMP_POPOUT_ACTION_LISTS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    private static final Map<View, Integer> TEMP_POPOUT_BASE_ACTION_COUNTS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -994,8 +997,17 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             // unpinned action used as a popup anchor is squeezed into the
             // already-reserved Extensions region, so New Tab / Tab Switcher /
             // app menu never move while a popup opens.
-            int pinnedActionCount = Math.max(
-                    0, actionCount - (hasTemporaryPopout ? 1 : 0));
+            int pinnedActionCount;
+            if (hasTemporaryPopout) {
+                Integer baseCount =
+                        TEMP_POPOUT_BASE_ACTION_COUNTS.get(actionListView);
+                pinnedActionCount =
+                        baseCount != null
+                                ? Math.max(0, baseCount)
+                                : Math.max(0, actionCount - 1);
+            } else {
+                pinnedActionCount = Math.max(0, actionCount);
+            }
             int extensionSlots = Math.max(1, pinnedActionCount + 1);
 
             ViewGroup.LayoutParams containerBase =
@@ -1389,13 +1401,13 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                             POP_OUT_RECONCILING.set(Boolean.TRUE);
                             try {
-                                TEMP_POPOUT_ACTION_LISTS.clear();
-
                                 Method reconcile = param.thisObject.getClass()
                                         .getDeclaredMethod("g");
                                 reconcile.setAccessible(true);
                                 reconcile.invoke(param.thisObject);
-                                log("undoPopout cleanup: reconciled action list; temporary icon removed");
+
+                                scheduleTemporaryPopoutCleanup();
+                                log("undoPopout cleanup: reconciled action list; waiting for temporary icon removal");
                             } catch (Throwable t) {
                                 log("undoPopout cleanup failed: " + stackSummary(t));
                             } finally {
@@ -1407,6 +1419,108 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("installed zo9.n() undoPopout reconcile hook");
         } catch (Throwable t) {
             log("could not hook zo9.n() undoPopout: " + stackSummary(t));
+        }
+    }
+
+    private static void scheduleTemporaryPopoutCleanup() {
+        java.util.ArrayList<View> pending = new java.util.ArrayList<>();
+        synchronized (TEMP_POPOUT_ACTION_LISTS) {
+            pending.addAll(TEMP_POPOUT_ACTION_LISTS.keySet());
+        }
+
+        for (View actionList : pending) {
+            if (actionList != null) {
+                waitForTemporaryActionRemoval(actionList, 0);
+            }
+        }
+    }
+
+    private static void waitForTemporaryActionRemoval(
+            View actionListView, int attempt) {
+        Integer baseValue =
+                TEMP_POPOUT_BASE_ACTION_COUNTS.get(actionListView);
+        if (baseValue == null) {
+            TEMP_POPOUT_ACTION_LISTS.remove(actionListView);
+            refreshBottomBarGeometry();
+            return;
+        }
+
+        final int baseActionCount = baseValue;
+        actionListView.postDelayed(() -> {
+            try {
+                int childCount =
+                        actionListView instanceof ViewGroup
+                                ? ((ViewGroup) actionListView).getChildCount()
+                                : 0;
+
+                if (childCount <= baseActionCount || attempt >= 30) {
+                    TEMP_POPOUT_ACTION_LISTS.remove(actionListView);
+                    TEMP_POPOUT_BASE_ACTION_COUNTS.remove(actionListView);
+
+                    refreshBottomBarGeometry();
+
+                    log("temporary popout cleanup complete: childCount="
+                            + childCount
+                            + " baseActionCount="
+                            + baseActionCount
+                            + " attempts="
+                            + attempt);
+                    return;
+                }
+
+                waitForTemporaryActionRemoval(
+                        actionListView, attempt + 1);
+            } catch (Throwable t) {
+                log("temporary popout cleanup polling failed: "
+                        + stackSummary(t));
+            }
+        }, attempt == 0 ? 16L : 32L);
+    }
+
+    private static void refreshBottomBarGeometry() {
+        try {
+            synchronized (ACTIVE_COORDINATORS) {
+                for (Map.Entry<Activity, Object> entry
+                        : ACTIVE_COORDINATORS.entrySet()) {
+                    Activity activity = entry.getKey();
+                    Object coordinator = entry.getValue();
+
+                    if (activity == null
+                            || coordinator == null
+                            || activity.isFinishing()
+                            || activity.isDestroyed()) {
+                        continue;
+                    }
+
+                    int bottomBarId = activity.getResources().getIdentifier(
+                            "bottom_bar_container",
+                            "id",
+                            TARGET_PACKAGE);
+                    View bottomBarView =
+                            bottomBarId != 0
+                                    ? activity.findViewById(bottomBarId)
+                                    : null;
+                    LinearLayout extensionsToolbar =
+                            findCoordinatorLinearContainer(coordinator);
+
+                    if (bottomBarView instanceof LinearLayout
+                            && extensionsToolbar != null
+                            && extensionsToolbar.getParent() == bottomBarView) {
+                        LinearLayout bottomBar =
+                                (LinearLayout) bottomBarView;
+                        applyBottomBarEqualSlots(
+                                bottomBar, extensionsToolbar);
+                        bottomBar.requestLayout();
+                        bottomBar.post(() -> {
+                            applyBottomBarEqualSlots(
+                                    bottomBar, extensionsToolbar);
+                            bottomBar.requestLayout();
+                        });
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log("Bottom Bar geometry refresh failed: " + stackSummary(t));
         }
     }
 
@@ -1619,8 +1733,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         if (!actionAlreadyVisible) {
+            int baseActionCount = 0;
+            if (recyclerView instanceof ViewGroup) {
+                baseActionCount = ((ViewGroup) recyclerView).getChildCount();
+            }
             TEMP_POPOUT_ACTION_LISTS.put(recyclerView, Boolean.TRUE);
-            log("popup bridge: temporary unpinned action will reuse existing Bottom Bar slot");
+            TEMP_POPOUT_BASE_ACTION_COUNTS.put(
+                    recyclerView, baseActionCount);
+            log("popup bridge: temporary unpinned action will reuse existing Bottom Bar slot; baseActionCount="
+                    + baseActionCount);
         }
 
         // requestShowPopup()/requestActionVisibility() has already run by the
@@ -1641,6 +1762,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             if (!actionAlreadyVisible) {
                 TEMP_POPOUT_ACTION_LISTS.remove(recyclerView);
+                TEMP_POPOUT_BASE_ACTION_COUNTS.remove(recyclerView);
             }
             log("popup bridge: reconcile trigger failed: " + stackSummary(t));
             return;
