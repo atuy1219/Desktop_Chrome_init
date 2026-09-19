@@ -62,6 +62,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
 
+    private static final Map<Activity, Object> ACTIVE_COORDINATORS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final class InitCapture {
         final Object contextMenuFactory;
         final Object extensionSupport;
@@ -84,6 +87,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         installToolbarInitCapture(lpparam.classLoader);
         installExtensionsMenuRepair(lpparam.classLoader);
+        installExtensionPopupWidthBridge(lpparam.classLoader);
     }
 
     /**
@@ -255,6 +259,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         Object existing = XposedHelpers.getObjectField(toolbarManager, "J1");
         if (existing != null) {
+            ACTIVE_COORDINATORS.put(activity, existing);
             scheduleRelocateExtensionsContainer(activity, existing, 0);
             return true;
         }
@@ -305,6 +310,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 : "repair failed: hns.J1 remained null");
 
         if (repaired) {
+            ACTIVE_COORDINATORS.put(activity, coordinator);
             scheduleRelocateExtensionsContainer(activity, coordinator, 0);
         }
         return repaired;
@@ -411,6 +417,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
             ViewStub injected = new ViewStub(container.getContext());
             injected.setId(stubId);
+            injected.setInflatedId(
+                    resources.getIdentifier(
+                            "extensions_toolbar_container",
+                            "id",
+                            TARGET_PACKAGE));
             injected.setLayoutResource(layoutId);
 
             ViewGroup group = (ViewGroup) container;
@@ -788,6 +799,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         View extensionsContainer = activity.findViewById(containerId);
+        if (!(extensionsContainer instanceof LinearLayout)) {
+            // The injected ViewStub in older module runs did not set inflatedId.
+            // Resolve mContainer from rr9 directly as a compatibility fallback.
+            extensionsContainer = findCoordinatorLinearContainer(coordinator);
+        }
         View bottomBarView = activity.findViewById(bottomBarId);
 
         if (!(extensionsContainer instanceof LinearLayout)) {
@@ -927,6 +943,161 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             if (found != null) {
                 return found;
             }
+        }
+        return null;
+    }
+
+    /**
+     * ExtensionsToolbarBridge is JNI-facing and its class/method name is kept
+     * in the release APK. Native executeAction() eventually calls triggerPopup().
+     * At that point ExtensionActionListMediator has already set its temporary
+     * popped-out action ID, but Phone Toolbar never runs Desktop's width
+     * consumers. Force their equivalent here.
+     */
+    private static void installExtensionPopupWidthBridge(ClassLoader classLoader) {
+        Class<?> bridgeClass = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.ui.extensions.ExtensionsToolbarBridge",
+                classLoader);
+        if (bridgeClass == null) {
+            log("ExtensionsToolbarBridge not found; popup width bridge unavailable");
+            return;
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    bridgeClass,
+                    "triggerPopup",
+                    String.class,
+                    long.class,
+                    boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                forcePendingExtensionActionLayout();
+                            } catch (Throwable t) {
+                                log("popup width bridge failed: " + stackSummary(t));
+                            }
+                        }
+                    });
+            log("installed ExtensionsToolbarBridge.triggerPopup width bridge");
+        } catch (Throwable t) {
+            log("could not hook ExtensionsToolbarBridge.triggerPopup: "
+                    + stackSummary(t));
+        }
+    }
+
+    private static void forcePendingExtensionActionLayout() throws Throwable {
+        Object coordinator = null;
+        Activity activity = null;
+
+        synchronized (ACTIVE_COORDINATORS) {
+            for (Map.Entry<Activity, Object> entry
+                    : ACTIVE_COORDINATORS.entrySet()) {
+                Activity candidate = entry.getKey();
+                if (candidate != null
+                        && !candidate.isFinishing()
+                        && !candidate.isDestroyed()) {
+                    activity = candidate;
+                    coordinator = entry.getValue();
+                    break;
+                }
+            }
+        }
+
+        if (coordinator == null || activity == null) {
+            log("popup width bridge: no active coordinator");
+            return;
+        }
+
+        Object actionListCoordinator =
+                XposedHelpers.getObjectField(coordinator, "V");
+        if (actionListCoordinator == null) {
+            log("popup width bridge: rr9.V is null");
+            return;
+        }
+
+        int buttonWidth = activity.getResources().getDimensionPixelSize(
+                activity.getResources().getIdentifier(
+                        "toolbar_button_width", "dimen", TARGET_PACKAGE));
+        if (buttonWidth <= 0) {
+            buttonWidth = Math.round(
+                    48f * activity.getResources().getDisplayMetrics().density);
+        }
+
+        int availableWidth = buttonWidth * 4;
+
+        // In 801004974 ExtensionActionListCoordinator has two public methods
+        // with signature int -> int:
+        //   setCanShowPoppedOutAction(int)
+        //   fitActionsWithinWidth(int)
+        //
+        // R8 renames both. Invoke all matching public methods twice. The second
+        // pass guarantees fitActionsWithinWidth runs after
+        // setCanShowPoppedOutAction regardless of obfuscated method order.
+        java.util.ArrayList<Method> widthMethods = new java.util.ArrayList<>();
+        for (Method method : actionListCoordinator.getClass().getDeclaredMethods()) {
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length == 1
+                    && params[0] == int.class
+                    && method.getReturnType() == int.class
+                    && java.lang.reflect.Modifier.isPublic(method.getModifiers())) {
+                method.setAccessible(true);
+                widthMethods.add(method);
+            }
+        }
+
+        if (widthMethods.isEmpty()) {
+            log("popup width bridge: no public int->int methods found on "
+                    + actionListCoordinator.getClass().getName());
+            return;
+        }
+
+        for (int pass = 0; pass < 2; pass++) {
+            for (Method method : widthMethods) {
+                try {
+                    method.invoke(actionListCoordinator, availableWidth);
+                } catch (Throwable t) {
+                    log("popup width method " + method.getName()
+                            + " failed: " + stackSummary(t));
+                }
+            }
+        }
+
+        // Force an actual layout pass so ExtensionActionListRecyclerView runs
+        // the queued "show popup on anchor" callback.
+        try {
+            Object recycler = XposedHelpers.getObjectField(
+                    actionListCoordinator, "T");
+            if (recycler instanceof View) {
+                View recyclerView = (View) recycler;
+                recyclerView.requestLayout();
+                recyclerView.post(() -> {
+                    recyclerView.requestLayout();
+                    log("forced extension action RecyclerView layout for popup");
+                });
+            }
+        } catch (Throwable t) {
+            log("popup width bridge: RecyclerView layout request failed: "
+                    + stackSummary(t));
+        }
+    }
+
+    private static LinearLayout findCoordinatorLinearContainer(Object coordinator) {
+        try {
+            for (Field field : coordinator.getClass().getDeclaredFields()) {
+                if (!LinearLayout.class.isAssignableFrom(field.getType())) {
+                    continue;
+                }
+                field.setAccessible(true);
+                Object value = field.get(coordinator);
+                if (value instanceof LinearLayout) {
+                    return (LinearLayout) value;
+                }
+            }
+        } catch (Throwable t) {
+            log("could not resolve coordinator LinearLayout container: "
+                    + stackSummary(t));
         }
         return null;
     }
