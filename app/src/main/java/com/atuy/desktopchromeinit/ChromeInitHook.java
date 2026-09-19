@@ -62,6 +62,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
 
+    private static final ThreadLocal<Boolean> POP_OUT_RECONCILING =
+            new ThreadLocal<>();
+
     private static final Map<Activity, Object> ACTIVE_COORDINATORS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -91,7 +94,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         installToolbarInitCapture(lpparam.classLoader);
         installExtensionsMenuRepair(lpparam.classLoader);
         installExtensionPopupWidthBridge(lpparam.classLoader);
-        installExtensionPopupDismissCleanup(lpparam.classLoader);
+        installPopoutUndoReconcile(lpparam.classLoader);
     }
 
     /**
@@ -949,6 +952,58 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
         }
         return null;
+    }
+
+    /**
+     * 801004974 release DEX mapping:
+     *   zo9 = ExtensionActionListMediator
+     *   zo9.n() = undoPopout()
+     *   zo9.g() = reconcileActionItems()
+     *
+     * Desktop/Tablet normally gets a toolbar width pass immediately after
+     * undoPopout(), which reconciles the model and removes the temporary
+     * unpinned action. ToolbarPhone never performs that pass, leaving the
+     * icon visible. Hook the exact state transition instead of popup.destroy().
+     */
+    private static void installPopoutUndoReconcile(ClassLoader classLoader) {
+        Class<?> mediatorClass = XposedHelpers.findClassIfExists("zo9", classLoader);
+        if (mediatorClass == null) {
+            log("zo9 mediator not found; pop-out cleanup unavailable");
+            return;
+        }
+
+        try {
+            Method undoPopout = mediatorClass.getDeclaredMethod("n");
+            undoPopout.setAccessible(true);
+
+            XposedBridge.hookMethod(
+                    undoPopout,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (Boolean.TRUE.equals(POP_OUT_RECONCILING.get())) {
+                                return;
+                            }
+
+                            POP_OUT_RECONCILING.set(Boolean.TRUE);
+                            try {
+                                Method reconcile = param.thisObject.getClass()
+                                        .getDeclaredMethod("g");
+                                reconcile.setAccessible(true);
+                                reconcile.invoke(param.thisObject);
+                                log("undoPopout cleanup: reconciled action list; temporary icon removed");
+                            } catch (Throwable t) {
+                                log("undoPopout cleanup failed: " + stackSummary(t));
+                            } finally {
+                                POP_OUT_RECONCILING.remove();
+                            }
+                        }
+                    });
+
+            log("installed zo9.n() undoPopout reconcile hook");
+        } catch (Throwable t) {
+            log("could not hook zo9.n() undoPopout: " + stackSummary(t));
+        }
     }
 
     private static void rememberExtensionBridge(Object bridge) {
