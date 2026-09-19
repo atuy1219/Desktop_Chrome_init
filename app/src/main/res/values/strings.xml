@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Desktop Chrome Init</string>
+    <string name="xposed_description">Repairs the Extensions toolbar coordinator initialization in Chrome Desktop Android build 153.0.8010.49 (801004974).</string>
+</resources>
