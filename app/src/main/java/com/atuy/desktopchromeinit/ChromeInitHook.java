@@ -975,6 +975,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
                                 forcePendingExtensionActionLayout(
+                                        param.thisObject,
                                         (String) param.args[0]);
                             } catch (Throwable t) {
                                 log("popup width bridge failed: " + stackSummary(t));
@@ -988,8 +989,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void forcePendingExtensionActionLayout(String actionId)
-            throws Throwable {
+    private static void forcePendingExtensionActionLayout(
+            Object extensionsToolbarBridge,
+            String actionId) throws Throwable {
         Object coordinator = null;
         Activity activity = null;
 
@@ -1008,102 +1010,54 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         if (coordinator == null || activity == null) {
-            log("popup width bridge: no active coordinator");
+            log("popup bridge: no active coordinator");
             return;
         }
 
         Object actionListCoordinator =
                 XposedHelpers.getObjectField(coordinator, "V");
         if (actionListCoordinator == null) {
-            log("popup width bridge: rr9.V is null");
+            log("popup bridge: rr9.V is null");
             return;
         }
 
-        // Do not depend on the public resource name
-        // "toolbar_button_width". This Chrome build may have that name stripped
-        // from the runtime resource table even though the compiled layout still
-        // references the dimension. Use the actual Extensions menu button width
-        // when available, then fall back to 48dp.
-        int buttonWidth = 0;
-        try {
-            LinearLayout container = findCoordinatorLinearContainer(coordinator);
-            if (container != null) {
-                int menuButtonId = activity.getResources().getIdentifier(
-                        "extensions_menu_button", "id", TARGET_PACKAGE);
-                if (menuButtonId != 0) {
-                    View menuButton = container.findViewById(menuButtonId);
-                    if (menuButton != null) {
-                        buttonWidth = Math.max(
-                                menuButton.getWidth(),
-                                menuButton.getMeasuredWidth());
-                        ViewGroup.LayoutParams lp = menuButton.getLayoutParams();
-                        if (buttonWidth <= 0 && lp != null && lp.width > 0) {
-                            buttonWidth = lp.width;
-                        }
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            log("popup width bridge: could not measure extensions button: "
-                    + stackSummary(t));
-        }
-
-        if (buttonWidth <= 0) {
-            buttonWidth = Math.round(
-                    48f * activity.getResources().getDisplayMetrics().density);
-        }
-
-        int availableWidth = Math.max(
-                buttonWidth * 8,
-                activity.getResources().getDisplayMetrics().widthPixels);
-
-        log("popup width bridge: buttonWidth=" + buttonWidth
-                + " availableWidth=" + availableWidth);
-
-        java.util.ArrayList<Method> widthMethods = new java.util.ArrayList<>();
         Method getButtonMethod = null;
-
-        // This class does not reference missing framework-only APIs, so exact
-        // signature inspection is safe here.
         for (Method method : actionListCoordinator.getClass().getDeclaredMethods()) {
             Class<?>[] params = method.getParameterTypes();
-
-            if (params.length == 1
-                    && params[0] == int.class
-                    && method.getReturnType() == int.class) {
-                method.setAccessible(true);
-                widthMethods.add(method);
-                continue;
-            }
-
             if (params.length == 1
                     && params[0] == String.class
                     && View.class.isAssignableFrom(method.getReturnType())) {
                 method.setAccessible(true);
                 getButtonMethod = method;
+                break;
             }
         }
 
-        if (widthMethods.isEmpty()) {
-            log("popup width bridge: no int->int methods found on "
+        if (getButtonMethod == null) {
+            log("popup bridge: String->View anchor method missing on "
                     + actionListCoordinator.getClass().getName());
             dumpDeclaredMethodShapes(actionListCoordinator.getClass());
             return;
         }
 
-        for (int pass = 0; pass < 3; pass++) {
-            for (Method method : widthMethods) {
-                try {
-                    Object result = method.invoke(
-                            actionListCoordinator, availableWidth);
-                    log("popup width bridge: "
-                            + method.getName() + "(" + availableWidth
-                            + ") -> " + result);
-                } catch (Throwable t) {
-                    log("popup width method " + method.getName()
-                            + " failed: " + stackSummary(t));
-                }
-            }
+        // requestShowPopup()/requestActionVisibility() has already run by the
+        // time this after-hook executes, so mPoppedOutActionId is populated.
+        // The Phone toolbar never calls the Desktop width consumers, and R8
+        // has removed their coordinator wrappers entirely in this build.
+        //
+        // onPinnedActionsChanged() is @CalledByNative and therefore kept. Its
+        // observer path calls ExtensionActionListMediator.reconcileActionItems(),
+        // which is exactly what is needed to materialize the temporary
+        // unpinned action model without changing the actual pinned state.
+        try {
+            Method refresh = extensionsToolbarBridge.getClass()
+                    .getDeclaredMethod("onPinnedActionsChanged");
+            refresh.setAccessible(true);
+            refresh.invoke(extensionsToolbarBridge);
+            log("popup bridge: forced action-list reconcile via onPinnedActionsChanged()");
+        } catch (Throwable t) {
+            log("popup bridge: reconcile trigger failed: " + stackSummary(t));
+            return;
         }
 
         Object recycler = null;
@@ -1113,21 +1067,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
 
         if (!(recycler instanceof View)) {
-            log("popup width bridge: action RecyclerView not found");
+            log("popup bridge: action RecyclerView not found");
             return;
         }
 
-        final View recyclerView = (View) recycler;
-        final Object finalCoordinator = actionListCoordinator;
-        final Method finalGetButtonMethod = getButtonMethod;
+        View recyclerView = (View) recycler;
+        recyclerView.requestLayout();
 
-        log("popup width bridge: waiting for temporary action anchor "
-                + actionId);
+        log("popup bridge: waiting for temporary action anchor " + actionId);
 
         pollForExtensionAnchorAndFlush(
                 actionId,
-                finalCoordinator,
-                finalGetButtonMethod,
+                actionListCoordinator,
+                getButtonMethod,
                 recyclerView,
                 0);
     }
@@ -1160,7 +1112,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         && anchor.isAttachedToWindow()
                         && anchor.getWidth() > 0
                         && anchor.getHeight() > 0) {
-                    log("popup width bridge: temporary anchor ready "
+                    log("popup bridge: temporary anchor ready "
                             + anchor.getWidth() + "x" + anchor.getHeight()
                             + "; flushing pending popup callback");
 
@@ -1184,7 +1136,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             recyclerView,
                             attempt + 1);
                 } else {
-                    log("popup width bridge: temporary anchor never became ready");
+                    log("popup bridge: temporary anchor never became ready");
                     dumpPopupRecyclerState(
                             actionId,
                             actionListCoordinator,
@@ -1236,7 +1188,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     }
 
                     ((java.util.List<Object>) list).clear();
-                    log("popup width bridge: flushing "
+                    log("popup bridge: flushing "
                             + runnables.size() + " pending RecyclerView runnable(s)");
 
                     for (Runnable runnable : runnables) {
