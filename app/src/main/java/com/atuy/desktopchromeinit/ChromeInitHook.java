@@ -157,8 +157,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 EXTENSIONS_ACTION.set(Boolean.TRUE);
 
                 try {
-                    Object toolbarManager = XposedHelpers.callMethod(
-                            activity, "P2");
+                    // Do not use XposedHelpers.callMethod() on ChromeActivity.
+                    // Its best-match implementation enumerates declared methods,
+                    // which attempts to resolve Android APIs that do not exist on
+                    // the phone build (notably android.app.HandoffActivityData).
+                    Object toolbarManager = invokeExactNoArg(activity, "P2");
                     if (toolbarManager == null) {
                         log("P2() returned null ToolbarManager");
                         param.setResult(true);
@@ -304,14 +307,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 return;
             }
 
-            XposedHelpers.callMethod(
+            invokeThreeArgExactByHierarchy(
                     activity,
                     "S2",
                     0,
                     taskId,
                     tabModelSelector
             );
-            log("retried ChromeActivity.S2(0, F3, O2)");
+            log("retried ChromeActivity.S2(0, F3, O2) without method enumeration");
         } catch (Throwable t) {
             log("ChromeActivity.S2 retry failed: " + stackSummary(t));
         }
@@ -515,6 +518,96 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("secondary toolbar registration failed: "
                     + stackSummary(t));
         }
+    }
+
+    /**
+     * Invoke a no-argument method without XposedHelpers' best-match lookup.
+     *
+     * Chrome Desktop references framework classes (for example
+     * android.app.HandoffActivityData) which are absent from this phone OS.
+     * Class.getDeclaredMethods() resolves every method signature and therefore
+     * throws NoClassDefFoundError before P2() can be invoked. Looking up the
+     * exact method name avoids resolving unrelated signatures.
+     */
+    private static Object invokeExactNoArg(Object receiver, String name)
+            throws Throwable {
+        Class<?> type = receiver.getClass();
+        Throwable last = null;
+
+        while (type != null) {
+            try {
+                Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                return method.invoke(receiver);
+            } catch (NoSuchMethodException e) {
+                last = e;
+                type = type.getSuperclass();
+            }
+        }
+
+        throw new NoSuchMethodException(
+                receiver.getClass().getName() + "." + name + "()"
+                        + (last != null ? " not found" : ""));
+    }
+
+    /**
+     * Same idea for S2(int, int, TabModelSelector). The exact third parameter
+     * type is obfuscated, so try the runtime class, its superclasses and
+     * interfaces one-by-one with getDeclaredMethod(). This still never calls
+     * getDeclaredMethods(), so unrelated unavailable Android API types are not
+     * resolved.
+     */
+    private static Object invokeThreeArgExactByHierarchy(
+            Object receiver,
+            String name,
+            int first,
+            int second,
+            Object third) throws Throwable {
+
+        if (third == null) {
+            throw new NullPointerException("third argument is null");
+        }
+
+        java.util.LinkedHashSet<Class<?>> candidates =
+                new java.util.LinkedHashSet<>();
+        collectTypeCandidates(third.getClass(), candidates);
+
+        Class<?> owner = receiver.getClass();
+        while (owner != null) {
+            for (Class<?> thirdType : candidates) {
+                try {
+                    Method method = owner.getDeclaredMethod(
+                            name,
+                            int.class,
+                            int.class,
+                            thirdType
+                    );
+                    method.setAccessible(true);
+                    return method.invoke(receiver, first, second, third);
+                } catch (NoSuchMethodException ignored) {
+                    // Try the next exact candidate without enumerating methods.
+                }
+            }
+            owner = owner.getSuperclass();
+        }
+
+        throw new NoSuchMethodException(
+                receiver.getClass().getName() + "." + name
+                        + "(int,int,<third>)");
+    }
+
+    private static void collectTypeCandidates(
+            Class<?> type,
+            java.util.LinkedHashSet<Class<?>> out) {
+        if (type == null || !out.add(type)) {
+            return;
+        }
+
+        for (Class<?> iface : type.getInterfaces()) {
+            collectTypeCandidates(iface, out);
+        }
+
+        collectTypeCandidates(type.getSuperclass(), out);
     }
 
     private static Object allocateWithoutConstructor(Class<?> type)
