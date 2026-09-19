@@ -17,6 +17,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+
+            // This repository publishes CI test builds rather than Play Store
+            // releases. Sign the release variant with the standard Android
+            // debug key so the generated APK is directly installable.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
