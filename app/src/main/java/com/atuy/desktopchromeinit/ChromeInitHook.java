@@ -7,6 +7,7 @@ import android.content.res.Resources;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewStub;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 
 import java.lang.reflect.Field;
@@ -69,6 +70,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final Map<Activity, Object> ACTIVE_EXTENSION_BRIDGES =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final Map<View, Boolean> BOTTOM_BAR_SLOT_HOOKS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final class InitCapture {
@@ -772,7 +779,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     return;
                 }
 
-                if (attempt < 20) {
+                if (relocateExtensionsContainerToCustomTab(activity, coordinator)) {
+                    return;
+                }
+
+                if (attempt < 50) {
                     View decor = activity.getWindow() != null
                             ? activity.getWindow().getDecorView()
                             : null;
@@ -783,7 +794,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 100L);
                     }
                 } else {
-                    log("bottom bar relocation gave up after 20 retries");
+                    log("extensions toolbar relocation gave up after 50 retries");
                 }
             } catch (Throwable t) {
                 log("extensions container relocation failed: " + stackSummary(t));
@@ -882,6 +893,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("moved complete extensions_toolbar_container into Android Bottom Bar");
         }
 
+        configureBottomBarEqualSlots(bottomBar, extensionsToolbar);
+
         // ExtensionActionListRecyclerView uses this root for transitions while
         // temporarily popping out an unpinned action. The original phone toolbar
         // is no longer the correct visual root after reparenting.
@@ -901,6 +914,331 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         return true;
+    }
+
+    /**
+     * Android Bottom Bar lays each native button inside a 0dp/weight=1
+     * BottomBarButtonContainer. Treat each extension icon as one identical
+     * slot as well:
+     *
+     *   new tab | tab switcher | [pinned actions...] | extensions | menu
+     *
+     * With one pinned action the Extensions container therefore consumes two
+     * slots, but each actual button still has exactly one slot of width.
+     */
+    private static void configureBottomBarEqualSlots(
+            LinearLayout bottomBar, LinearLayout extensionsToolbar) {
+        try {
+            if (!BOTTOM_BAR_SLOT_HOOKS.containsKey(extensionsToolbar)) {
+                BOTTOM_BAR_SLOT_HOOKS.put(extensionsToolbar, Boolean.TRUE);
+
+                View.OnLayoutChangeListener listener =
+                        (v, left, top, right, bottom,
+                                oldLeft, oldTop, oldRight, oldBottom) ->
+                                applyBottomBarEqualSlots(
+                                        bottomBar, extensionsToolbar);
+
+                bottomBar.addOnLayoutChangeListener(listener);
+                extensionsToolbar.addOnLayoutChangeListener(listener);
+
+                View actionList = findNamedView(
+                        extensionsToolbar,
+                        extensionsToolbar.getResources(),
+                        "extension_action_list");
+                if (actionList != null) {
+                    actionList.addOnLayoutChangeListener(listener);
+                }
+            }
+
+            applyBottomBarEqualSlots(bottomBar, extensionsToolbar);
+            bottomBar.post(() -> applyBottomBarEqualSlots(
+                    bottomBar, extensionsToolbar));
+        } catch (Throwable t) {
+            log("bottom bar equal-slot setup failed: " + stackSummary(t));
+        }
+    }
+
+    private static void applyBottomBarEqualSlots(
+            LinearLayout bottomBar, LinearLayout extensionsToolbar) {
+        try {
+            if (bottomBar.getWidth() <= 0) {
+                return;
+            }
+
+            Resources res = extensionsToolbar.getResources();
+            View actionListView = findNamedView(
+                    extensionsToolbar, res, "extension_action_list");
+            View menuButton = findNamedView(
+                    extensionsToolbar, res, "extensions_menu_button");
+
+            int actionCount = 0;
+            if (actionListView instanceof ViewGroup
+                    && actionListView.getVisibility() != View.GONE) {
+                actionCount = ((ViewGroup) actionListView).getChildCount();
+            }
+
+            int extensionSlots = Math.max(1, actionCount + 1);
+
+            int nativeSlots = 0;
+            for (int i = 0; i < bottomBar.getChildCount(); i++) {
+                View child = bottomBar.getChildAt(i);
+                if (child == extensionsToolbar
+                        || child.getVisibility() == View.GONE) {
+                    continue;
+                }
+                nativeSlots++;
+            }
+
+            int totalSlots = nativeSlots + extensionSlots;
+            if (totalSlots <= 0) {
+                return;
+            }
+
+            int slotWidth = bottomBar.getWidth() / totalSlots;
+            if (slotWidth <= 0) {
+                return;
+            }
+
+            ViewGroup.LayoutParams containerBase =
+                    extensionsToolbar.getLayoutParams();
+            LinearLayout.LayoutParams containerLp;
+            if (containerBase instanceof LinearLayout.LayoutParams) {
+                containerLp = (LinearLayout.LayoutParams) containerBase;
+            } else {
+                containerLp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.MATCH_PARENT);
+            }
+
+            boolean containerChanged =
+                    containerLp.width != 0
+                            || containerLp.weight != extensionSlots;
+            containerLp.width = 0;
+            containerLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+            containerLp.weight = extensionSlots;
+            containerLp.gravity = android.view.Gravity.CENTER_VERTICAL;
+            if (containerChanged) {
+                extensionsToolbar.setLayoutParams(containerLp);
+            }
+
+            if (menuButton != null) {
+                ViewGroup.LayoutParams old = menuButton.getLayoutParams();
+                LinearLayout.LayoutParams lp =
+                        old instanceof LinearLayout.LayoutParams
+                                ? (LinearLayout.LayoutParams) old
+                                : new LinearLayout.LayoutParams(
+                                        slotWidth,
+                                        ViewGroup.LayoutParams.MATCH_PARENT);
+                if (lp.width != slotWidth || lp.weight != 0f) {
+                    lp.width = slotWidth;
+                    lp.weight = 0f;
+                    menuButton.setLayoutParams(lp);
+                }
+            }
+
+            if (actionListView != null) {
+                ViewGroup.LayoutParams old = actionListView.getLayoutParams();
+                LinearLayout.LayoutParams lp =
+                        old instanceof LinearLayout.LayoutParams
+                                ? (LinearLayout.LayoutParams) old
+                                : new LinearLayout.LayoutParams(
+                                        actionCount * slotWidth,
+                                        ViewGroup.LayoutParams.MATCH_PARENT);
+                int wantedWidth = actionCount * slotWidth;
+                if (lp.width != wantedWidth || lp.weight != 0f) {
+                    lp.width = wantedWidth;
+                    lp.weight = 0f;
+                    actionListView.setLayoutParams(lp);
+                }
+
+                if (actionListView instanceof ViewGroup && actionCount > 0) {
+                    ViewGroup group = (ViewGroup) actionListView;
+                    for (int i = 0; i < group.getChildCount(); i++) {
+                        View child = group.getChildAt(i);
+                        ViewGroup.LayoutParams childLp = child.getLayoutParams();
+                        if (childLp != null && childLp.width != slotWidth) {
+                            childLp.width = slotWidth;
+                            child.setLayoutParams(childLp);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log("bottom bar equal-slot apply failed: " + stackSummary(t));
+        }
+    }
+
+    /**
+     * Custom Tab uses an overlay FrameLayout for end-aligned action buttons.
+     * The adaptive optional_button is where the Translate button is displayed.
+     * Keep Chrome's optional-button reservation in the positioning model, hide
+     * the actual optional button, and place the complete Extensions container
+     * at exactly the same gravity/margins.
+     *
+     * Moving the complete container (rather than only extensions_menu_button)
+     * keeps showExtensionsMenu() and temporary unpinned-action popup anchors
+     * functional.
+     */
+    private static boolean relocateExtensionsContainerToCustomTab(
+            Activity activity, Object coordinator) throws Throwable {
+        Resources res = activity.getResources();
+
+        int toolbarId = res.getIdentifier("toolbar", "id", TARGET_PACKAGE);
+        if (toolbarId == 0) {
+            return false;
+        }
+
+        View toolbar = activity.findViewById(toolbarId);
+        if (toolbar == null
+                || !toolbar.getClass().getName().contains(
+                        ".customtabs.features.toolbar.CustomTabToolbar")) {
+            return false;
+        }
+
+        View extensionsContainer = findCoordinatorLinearContainer(coordinator);
+        if (!(extensionsContainer instanceof LinearLayout)) {
+            log("CCT relocation pending: Extensions container not inflated");
+            return false;
+        }
+
+        int actionsId = res.getIdentifier(
+                "action_buttons", "id", TARGET_PACKAGE);
+        int optionalId = res.getIdentifier(
+                "optional_button", "id", TARGET_PACKAGE);
+
+        View actionButtonsView =
+                actionsId != 0 ? toolbar.findViewById(actionsId) : null;
+        View optionalButton =
+                optionalId != 0 ? toolbar.findViewById(optionalId) : null;
+
+        if (!(actionButtonsView instanceof FrameLayout)) {
+            log("CCT relocation pending: action_buttons not available");
+            return false;
+        }
+        if (optionalButton == null) {
+            log("CCT relocation pending: optional/Translate button not inflated");
+            return false;
+        }
+
+        FrameLayout actionButtons = (FrameLayout) actionButtonsView;
+        LinearLayout extensionsToolbar = (LinearLayout) extensionsContainer;
+
+        syncCustomTabExtensionsToOptionalSlot(
+                toolbar,
+                actionButtons,
+                optionalButton,
+                extensionsToolbar);
+
+        if (!CUSTOM_TAB_LAYOUT_HOOKS.containsKey(toolbar)) {
+            CUSTOM_TAB_LAYOUT_HOOKS.put(toolbar, Boolean.TRUE);
+            toolbar.addOnLayoutChangeListener(
+                    (v, left, top, right, bottom,
+                            oldLeft, oldTop, oldRight, oldBottom) -> {
+                        try {
+                            View currentOptional =
+                                    optionalId != 0
+                                            ? toolbar.findViewById(optionalId)
+                                            : null;
+                            if (currentOptional != null) {
+                                syncCustomTabExtensionsToOptionalSlot(
+                                        toolbar,
+                                        actionButtons,
+                                        currentOptional,
+                                        extensionsToolbar);
+                            }
+                        } catch (Throwable t) {
+                            log("CCT extension-slot sync failed: "
+                                    + stackSummary(t));
+                        }
+                    });
+        }
+
+        try {
+            Object actionListCoordinator =
+                    XposedHelpers.getObjectField(coordinator, "V");
+            if (actionListCoordinator != null) {
+                Object recycler = XposedHelpers.getObjectField(
+                        actionListCoordinator, "T");
+                if (recycler != null) {
+                    XposedHelpers.setObjectField(
+                            recycler, "I1", actionButtons);
+                }
+            }
+        } catch (Throwable t) {
+            log("CCT transition-root rebind failed: " + stackSummary(t));
+        }
+
+        return true;
+    }
+
+    private static void syncCustomTabExtensionsToOptionalSlot(
+            View toolbar,
+            FrameLayout actionButtons,
+            View optionalButton,
+            LinearLayout extensionsToolbar) {
+
+        ViewGroup.LayoutParams optionalBase = optionalButton.getLayoutParams();
+        if (!(optionalBase instanceof FrameLayout.LayoutParams)) {
+            return;
+        }
+
+        FrameLayout.LayoutParams source =
+                (FrameLayout.LayoutParams) optionalBase;
+
+        optionalButton.setVisibility(View.GONE);
+        optionalButton.setClickable(false);
+        optionalButton.setFocusable(false);
+
+        if (extensionsToolbar.getParent() != actionButtons) {
+            ViewGroup oldParent =
+                    extensionsToolbar.getParent() instanceof ViewGroup
+                            ? (ViewGroup) extensionsToolbar.getParent()
+                            : null;
+            if (oldParent != null) {
+                oldParent.removeView(extensionsToolbar);
+            }
+            actionButtons.addView(extensionsToolbar);
+            log("moved extensions toolbar into Custom Tab Translate slot");
+        }
+
+        FrameLayout.LayoutParams target =
+                extensionsToolbar.getLayoutParams()
+                                instanceof FrameLayout.LayoutParams
+                        ? (FrameLayout.LayoutParams)
+                                extensionsToolbar.getLayoutParams()
+                        : new FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT);
+
+        int sourceStart = source.getMarginStart();
+        int sourceEnd = source.getMarginEnd();
+
+        boolean changed =
+                target.width != ViewGroup.LayoutParams.WRAP_CONTENT
+                        || target.height != source.height
+                        || target.gravity != source.gravity
+                        || target.leftMargin != source.leftMargin
+                        || target.topMargin != source.topMargin
+                        || target.rightMargin != source.rightMargin
+                        || target.bottomMargin != source.bottomMargin
+                        || target.getMarginStart() != sourceStart
+                        || target.getMarginEnd() != sourceEnd;
+
+        if (changed) {
+            target.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+            target.height = source.height;
+            target.gravity = source.gravity;
+            target.leftMargin = source.leftMargin;
+            target.topMargin = source.topMargin;
+            target.rightMargin = source.rightMargin;
+            target.bottomMargin = source.bottomMargin;
+            target.setMarginStart(sourceStart);
+            target.setMarginEnd(sourceEnd);
+            extensionsToolbar.setLayoutParams(target);
+        }
+
+        extensionsToolbar.setVisibility(View.VISIBLE);
+        extensionsToolbar.setAlpha(1.0f);
+        extensionsToolbar.bringToFront();
     }
 
     private static Activity unwrapActivity(Context context) {
