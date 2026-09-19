@@ -1019,19 +1019,46 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        int dimenId = activity.getResources().getIdentifier(
-                "toolbar_button_width", "dimen", TARGET_PACKAGE);
-        int buttonWidth = dimenId != 0
-                ? activity.getResources().getDimensionPixelSize(dimenId)
-                : Math.round(
-                        48f * activity.getResources().getDisplayMetrics().density);
+        // Do not depend on the public resource name
+        // "toolbar_button_width". This Chrome build may have that name stripped
+        // from the runtime resource table even though the compiled layout still
+        // references the dimension. Use the actual Extensions menu button width
+        // when available, then fall back to 48dp.
+        int buttonWidth = 0;
+        try {
+            LinearLayout container = findCoordinatorLinearContainer(coordinator);
+            if (container != null) {
+                int menuButtonId = activity.getResources().getIdentifier(
+                        "extensions_menu_button", "id", TARGET_PACKAGE);
+                if (menuButtonId != 0) {
+                    View menuButton = container.findViewById(menuButtonId);
+                    if (menuButton != null) {
+                        buttonWidth = Math.max(
+                                menuButton.getWidth(),
+                                menuButton.getMeasuredWidth());
+                        ViewGroup.LayoutParams lp = menuButton.getLayoutParams();
+                        if (buttonWidth <= 0 && lp != null && lp.width > 0) {
+                            buttonWidth = lp.width;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log("popup width bridge: could not measure extensions button: "
+                    + stackSummary(t));
+        }
 
-        // Give the popped-out action enough room irrespective of the phone
-        // Toolbar width allocator, which never knows about this Desktop-only
-        // consumer.
+        if (buttonWidth <= 0) {
+            buttonWidth = Math.round(
+                    48f * activity.getResources().getDisplayMetrics().density);
+        }
+
         int availableWidth = Math.max(
                 buttonWidth * 8,
                 activity.getResources().getDisplayMetrics().widthPixels);
+
+        log("popup width bridge: buttonWidth=" + buttonWidth
+                + " availableWidth=" + availableWidth);
 
         java.util.ArrayList<Method> widthMethods = new java.util.ArrayList<>();
         Method getButtonMethod = null;
