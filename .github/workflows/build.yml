@@ -8,20 +8,19 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pin the image so the ubuntu-latest -> Ubuntu 26 migration does not
+    # unexpectedly change the Android build environment.
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
-      # GitHub-hosted Ubuntu runners already provide ANDROID_HOME/ANDROID_SDK_ROOT
-      # and current Android SDK platforms/build-tools. Avoid setup-android@v3:
-      # its sdkmanager bootstrap currently tries to resolve the removed "tools"
-      # package and can fail before Gradle starts.
+      # GitHub-hosted Ubuntu runners already provide ANDROID_HOME/ANDROID_SDK_ROOT.
       - name: Show Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
@@ -29,14 +28,30 @@ jobs:
           ls -la "$ANDROID_HOME/platforms" | tail -20
           ls -la "$ANDROID_HOME/build-tools" | tail -20
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.9"
 
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      - uses: actions/upload-artifact@v4
+      # The release variant has no signingConfig, so AGP normally emits
+      # app-release-unsigned.apk. Normalize the filename for the artifact.
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "No APK found under app/build/outputs/apk/release"
+            find app/build/outputs -maxdepth 5 -type f -print || true
+            exit 1
+          fi
+          echo "Generated APK: $APK"
+          cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
+          ls -lh app/build/outputs/DesktopChromeInit-release.apk
+
+      - uses: actions/upload-artifact@v7
         with:
           name: DesktopChromeInit-release
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/DesktopChromeInit-release.apk
+          if-no-files-found: error
