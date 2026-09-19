@@ -5,6 +5,8 @@ import android.content.res.Resources;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewStub;
+import android.view.Gravity;
+import android.widget.FrameLayout;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -58,6 +60,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
+
+    private static final Map<Activity, FrameLayout> EXTENSIONS_BUTTON_HOSTS =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final class InitCapture {
         final Object contextMenuFactory;
@@ -224,6 +229,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         Object existing = XposedHelpers.getObjectField(toolbarManager, "J1");
         if (existing != null) {
+            relocateExtensionsButtonToBottomToolbar(activity);
             return true;
         }
 
@@ -271,6 +277,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         log(repaired
                 ? "repair successful: hns.J1 initialized"
                 : "repair failed: hns.J1 remained null");
+
+        if (repaired) {
+            relocateExtensionsButtonToBottomToolbar(activity);
+        }
         return repaired;
     }
 
@@ -683,6 +693,218 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         collectTypeCandidates(type.getSuperclass(), out);
+    }
+
+    /**
+     * Move Chrome's real extensions menu button out of the injected Desktop
+     * toolbar and place it in the phone bottom toolbar row.
+     *
+     * This intentionally moves the original View rather than creating a proxy:
+     * the coordinator keeps its existing click listener and popup anchor.
+     */
+    private static void relocateExtensionsButtonToBottomToolbar(Activity activity) {
+        activity.runOnUiThread(() -> {
+            try {
+                Resources res = activity.getResources();
+
+                int extensionsButtonId = res.getIdentifier(
+                        "extensions_menu_button", "id", TARGET_PACKAGE);
+                int bottomToolbarId = res.getIdentifier(
+                        "bottom_toolbar", "id", TARGET_PACKAGE);
+
+                if (extensionsButtonId == 0 || bottomToolbarId == 0) {
+                    log("relocation skipped: extensions_menu_button or bottom_toolbar id missing");
+                    return;
+                }
+
+                View extensionsButton = activity.findViewById(extensionsButtonId);
+                View bottomToolbar = activity.findViewById(bottomToolbarId);
+                View contentView = activity.findViewById(android.R.id.content);
+
+                if (extensionsButton == null) {
+                    log("relocation skipped: extensions_menu_button not found");
+                    return;
+                }
+                if (bottomToolbar == null) {
+                    log("relocation skipped: bottom_toolbar not found");
+                    return;
+                }
+                if (!(contentView instanceof FrameLayout)) {
+                    log("relocation skipped: android.R.id.content is "
+                            + (contentView == null
+                            ? "null"
+                            : contentView.getClass().getName()));
+                    return;
+                }
+
+                FrameLayout content = (FrameLayout) contentView;
+                FrameLayout host = EXTENSIONS_BUTTON_HOSTS.get(activity);
+
+                if (host == null) {
+                    int size = Math.max(
+                            dp(activity, 48),
+                            Math.max(
+                                    extensionsButton.getMeasuredWidth(),
+                                    extensionsButton.getMeasuredHeight()));
+
+                    host = new FrameLayout(activity);
+                    host.setClipChildren(false);
+                    host.setClipToPadding(false);
+                    host.setElevation(Math.max(
+                            bottomToolbar.getElevation(),
+                            extensionsButton.getElevation()));
+
+                    FrameLayout.LayoutParams hostLp =
+                            new FrameLayout.LayoutParams(size, size, Gravity.TOP | Gravity.START);
+                    content.addView(host, hostLp);
+
+                    ViewGroup oldParent =
+                            extensionsButton.getParent() instanceof ViewGroup
+                                    ? (ViewGroup) extensionsButton.getParent()
+                                    : null;
+                    if (oldParent != null) {
+                        oldParent.removeView(extensionsButton);
+                    }
+
+                    FrameLayout.LayoutParams buttonLp =
+                            new FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    Gravity.CENTER);
+                    host.addView(extensionsButton, buttonLp);
+
+                    EXTENSIONS_BUTTON_HOSTS.put(activity, host);
+                    log("moved real extensions_menu_button to bottom toolbar overlay");
+                } else if (extensionsButton.getParent() != host) {
+                    ViewGroup currentParent =
+                            extensionsButton.getParent() instanceof ViewGroup
+                                    ? (ViewGroup) extensionsButton.getParent()
+                                    : null;
+                    if (currentParent != null) {
+                        currentParent.removeView(extensionsButton);
+                    }
+                    host.removeAllViews();
+                    host.addView(
+                            extensionsButton,
+                            new FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    Gravity.CENTER));
+                }
+
+                final FrameLayout finalHost = host;
+                final View finalBottomToolbar = bottomToolbar;
+
+                Runnable position = () -> positionExtensionsButtonHost(
+                        activity, content, finalBottomToolbar, finalHost);
+
+                // Position now and after the current layout pass.
+                position.run();
+                bottomToolbar.post(position);
+
+                // Bottom controls can translate/resize while scrolling. Pre-draw
+                // keeps the moved button visually attached to that row.
+                bottomToolbar.getViewTreeObserver().addOnPreDrawListener(() -> {
+                    if (finalHost.isAttachedToWindow()
+                            && finalBottomToolbar.isAttachedToWindow()) {
+                        position.run();
+                    }
+                    return true;
+                });
+            } catch (Throwable t) {
+                log("extensions button relocation failed: " + stackSummary(t));
+            }
+        });
+    }
+
+    private static void positionExtensionsButtonHost(
+            Activity activity,
+            FrameLayout content,
+            View bottomToolbar,
+            FrameLayout host) {
+
+        if (bottomToolbar.getWidth() <= 0 || bottomToolbar.getHeight() <= 0) {
+            return;
+        }
+
+        int[] contentLocation = new int[2];
+        int[] bottomLocation = new int[2];
+        content.getLocationOnScreen(contentLocation);
+        bottomToolbar.getLocationOnScreen(bottomLocation);
+
+        View tabButton = findNamedView(
+                bottomToolbar,
+                activity.getResources(),
+                "tab_switcher_button",
+                "tab_switcher_mode_tab_switcher_button");
+        View menuButton = findNamedView(
+                bottomToolbar,
+                activity.getResources(),
+                "menu_button_wrapper",
+                "menu_button");
+
+        float centerX;
+        if (tabButton != null && menuButton != null) {
+            int[] tabLocation = new int[2];
+            int[] menuLocation = new int[2];
+            tabButton.getLocationOnScreen(tabLocation);
+            menuButton.getLocationOnScreen(menuLocation);
+
+            float tabCenter =
+                    tabLocation[0] + tabButton.getWidth() / 2f;
+            float menuCenter =
+                    menuLocation[0] + menuButton.getWidth() / 2f;
+            centerX = (tabCenter + menuCenter) / 2f;
+        } else {
+            // Matches the visual empty slot between the center tab button and
+            // the right-side menu in the phone bottom toolbar.
+            centerX = bottomLocation[0] + bottomToolbar.getWidth() * 2f / 3f;
+        }
+
+        float centerY =
+                bottomLocation[1] + bottomToolbar.getHeight() / 2f;
+
+        FrameLayout.LayoutParams lp =
+                (FrameLayout.LayoutParams) host.getLayoutParams();
+
+        int left = Math.round(
+                centerX - contentLocation[0] - host.getWidth() / 2f);
+        int top = Math.round(
+                centerY - contentLocation[1] - host.getHeight() / 2f);
+
+        if (lp.leftMargin != left || lp.topMargin != top) {
+            lp.leftMargin = left;
+            lp.topMargin = top;
+            host.setLayoutParams(lp);
+        }
+
+        host.setTranslationY(bottomToolbar.getTranslationY());
+        host.setVisibility(bottomToolbar.getVisibility());
+        host.setAlpha(bottomToolbar.getAlpha());
+    }
+
+    private static View findNamedView(
+            View root,
+            Resources resources,
+            String... names) {
+
+        for (String name : names) {
+            int id = resources.getIdentifier(name, "id", TARGET_PACKAGE);
+            if (id == 0) {
+                continue;
+            }
+
+            View found = root.findViewById(id);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    private static int dp(Activity activity, int value) {
+        return Math.round(
+                value * activity.getResources().getDisplayMetrics().density);
     }
 
     private static Object allocateWithoutConstructor(Class<?> type)
