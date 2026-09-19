@@ -1070,8 +1070,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
             if (params.length == 1
                     && params[0] == int.class
-                    && method.getReturnType() == int.class
-                    && java.lang.reflect.Modifier.isPublic(method.getModifiers())) {
+                    && method.getReturnType() == int.class) {
                 method.setAccessible(true);
                 widthMethods.add(method);
                 continue;
@@ -1079,16 +1078,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
             if (params.length == 1
                     && params[0] == String.class
-                    && View.class.isAssignableFrom(method.getReturnType())
-                    && java.lang.reflect.Modifier.isPublic(method.getModifiers())) {
+                    && View.class.isAssignableFrom(method.getReturnType())) {
                 method.setAccessible(true);
                 getButtonMethod = method;
             }
         }
 
         if (widthMethods.isEmpty()) {
-            log("popup width bridge: no public int->int methods found on "
+            log("popup width bridge: no int->int methods found on "
                     + actionListCoordinator.getClass().getName());
+            dumpDeclaredMethodShapes(actionListCoordinator.getClass());
             return;
         }
 
@@ -1277,6 +1276,28 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log(out.toString());
         } catch (Throwable t) {
             log("popup debug dump failed: " + stackSummary(t));
+        }
+    }
+
+    private static void dumpDeclaredMethodShapes(Class<?> type) {
+        try {
+            StringBuilder out = new StringBuilder();
+            out.append("declared methods on ").append(type.getName()).append(": ");
+            Method[] methods = type.getDeclaredMethods();
+            for (int i = 0; i < methods.length; i++) {
+                Method method = methods[i];
+                out.append(method.getName()).append("(");
+                Class<?>[] params = method.getParameterTypes();
+                for (int p = 0; p < params.length; p++) {
+                    if (p > 0) out.append(",");
+                    out.append(params[p].getSimpleName());
+                }
+                out.append(")->").append(method.getReturnType().getSimpleName());
+                if (i + 1 < methods.length) out.append("; ");
+            }
+            log(out.toString());
+        } catch (Throwable t) {
+            log("could not dump method shapes: " + stackSummary(t));
         }
     }
 
