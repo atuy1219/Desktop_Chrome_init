@@ -65,6 +65,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<Activity, Object> ACTIVE_COORDINATORS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    private static final Map<Activity, Object> ACTIVE_EXTENSION_BRIDGES =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final class InitCapture {
         final Object contextMenuFactory;
         final Object extensionSupport;
@@ -88,6 +91,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         installToolbarInitCapture(lpparam.classLoader);
         installExtensionsMenuRepair(lpparam.classLoader);
         installExtensionPopupWidthBridge(lpparam.classLoader);
+        installExtensionPopupDismissCleanup(lpparam.classLoader);
     }
 
     /**
@@ -947,6 +951,97 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         return null;
     }
 
+    private static void rememberExtensionBridge(Object bridge) {
+        if (bridge == null) return;
+
+        synchronized (ACTIVE_COORDINATORS) {
+            for (Map.Entry<Activity, Object> entry : ACTIVE_COORDINATORS.entrySet()) {
+                Activity activity = entry.getKey();
+                if (activity != null
+                        && !activity.isFinishing()
+                        && !activity.isDestroyed()) {
+                    ACTIVE_EXTENSION_BRIDGES.put(activity, bridge);
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * Popup dismissal calls ExtensionActionListMediator.closePopup(), which in
+     * turn calls undoPopout(). On a real Desktop/Tablet toolbar the following
+     * toolbar-width pass reconciles the model and removes the temporary action.
+     * ToolbarPhone never performs that pass.
+     *
+     * Hook ExtensionActionPopup.destroy() and post one task so closePopup() can
+     * finish undoPopout() first. Then re-run the bridge observer notification,
+     * which causes reconcileActionItems() and removes the temporary icon.
+     */
+    private static void installExtensionPopupDismissCleanup(ClassLoader classLoader) {
+        Class<?> popupClass = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.toolbar.extensions.ExtensionActionPopup",
+                classLoader);
+        if (popupClass == null) {
+            log("ExtensionActionPopup not found; dismiss cleanup unavailable");
+            return;
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    popupClass,
+                    "destroy",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                android.os.Handler handler =
+                                        new android.os.Handler(android.os.Looper.getMainLooper());
+                                handler.post(() -> reconcileAfterPopupDismiss());
+                            } catch (Throwable t) {
+                                log("popup dismiss cleanup scheduling failed: "
+                                        + stackSummary(t));
+                            }
+                        }
+                    });
+            log("installed ExtensionActionPopup.destroy dismiss cleanup");
+        } catch (Throwable t) {
+            log("could not hook ExtensionActionPopup.destroy: "
+                    + stackSummary(t));
+        }
+    }
+
+    private static void reconcileAfterPopupDismiss() {
+        try {
+            int count = 0;
+            synchronized (ACTIVE_EXTENSION_BRIDGES) {
+                for (Map.Entry<Activity, Object> entry
+                        : ACTIVE_EXTENSION_BRIDGES.entrySet()) {
+                    Activity activity = entry.getKey();
+                    Object bridge = entry.getValue();
+                    if (activity == null
+                            || bridge == null
+                            || activity.isFinishing()
+                            || activity.isDestroyed()) {
+                        continue;
+                    }
+
+                    try {
+                        Method refresh = bridge.getClass()
+                                .getDeclaredMethod("onPinnedActionsChanged");
+                        refresh.setAccessible(true);
+                        refresh.invoke(bridge);
+                        count++;
+                    } catch (Throwable t) {
+                        log("popup dismiss reconcile failed: " + stackSummary(t));
+                    }
+                }
+            }
+            log("popup dismiss cleanup: reconciled " + count + " active bridge(s)");
+        } catch (Throwable t) {
+            log("popup dismiss cleanup failed: " + stackSummary(t));
+        }
+    }
+
     /**
      * ExtensionsToolbarBridge is JNI-facing and its class/method name is kept
      * in the release APK. Native executeAction() eventually calls triggerPopup().
@@ -974,6 +1069,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
+                                rememberExtensionBridge(param.thisObject);
                                 forcePendingExtensionActionLayout(
                                         param.thisObject,
                                         (String) param.args[0]);
