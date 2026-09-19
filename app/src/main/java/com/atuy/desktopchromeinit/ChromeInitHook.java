@@ -1,6 +1,8 @@
 package com.atuy.desktopchromeinit;
 
 import android.app.Activity;
+import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.res.Resources;
 import android.view.View;
 import android.view.ViewGroup;
@@ -114,16 +116,44 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
+                final Object toolbarManagerObject = param.thisObject;
                 try {
                     Object coordinator = XposedHelpers.getObjectField(
-                            param.thisObject, "J1");
+                            toolbarManagerObject, "J1");
                     if (coordinator == null) {
-                        log("initializeWithNative finished with hns.J1 == null");
+                        log("initializeWithNative finished with hns.J1 == null; scheduling proactive repair");
                     } else {
                         log("Extensions coordinator initialized normally");
                     }
+
+                    Object controlContainer = XposedHelpers.getObjectField(
+                            toolbarManagerObject, "d0");
+                    if (!(controlContainer instanceof View)) {
+                        log("proactive repair skipped: hns.d0 is not a View");
+                        return;
+                    }
+
+                    View controlView = (View) controlContainer;
+                    Activity activity = unwrapActivity(controlView.getContext());
+                    if (activity == null) {
+                        log("proactive repair skipped: could not resolve Activity from hns.d0 context");
+                        return;
+                    }
+
+                    controlView.post(() -> {
+                        try {
+                            if (repairCoordinator(activity, toolbarManagerObject)) {
+                                Object repairedCoordinator = XposedHelpers.getObjectField(
+                                        toolbarManagerObject, "J1");
+                                scheduleRelocateExtensionsContainer(
+                                        activity, repairedCoordinator, 0);
+                            }
+                        } catch (Throwable t) {
+                            log("proactive repair failed: " + stackSummary(t));
+                        }
+                    });
                 } catch (Throwable t) {
-                    log("could not inspect hns.J1 after init: " + t);
+                    log("could not inspect/proactively repair hns.J1 after init: " + t);
                 }
             }
         });
@@ -225,7 +255,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         Object existing = XposedHelpers.getObjectField(toolbarManager, "J1");
         if (existing != null) {
-            relocateExtensionsButtonToBottomToolbar(activity);
+            scheduleRelocateExtensionsContainer(activity, existing, 0);
             return true;
         }
 
@@ -275,7 +305,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 : "repair failed: hns.J1 remained null");
 
         if (repaired) {
-            relocateExtensionsButtonToBottomToolbar(activity);
+            scheduleRelocateExtensionsContainer(activity, coordinator, 0);
         }
         return repaired;
     }
@@ -698,183 +728,188 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      * This intentionally moves the original View rather than creating a proxy:
      * the coordinator keeps its existing click listener and popup anchor.
      */
-    private static void relocateExtensionsButtonToBottomToolbar(Activity activity) {
+    /**
+     * Android Bottom Bar 1A fix.
+     *
+     * Do not detach extensions_menu_button from Chrome's mContainer. The
+     * coordinator's showExtensionsMenu() searches the button inside mContainer,
+     * and unpinned extension actions temporarily pop out through the sibling
+     * extension_action_list before their popup is shown.
+     *
+     * Move the complete extensions_toolbar_container instead. This preserves:
+     * - the app-menu "Extensions" entry;
+     * - the Extensions button and its popup anchor;
+     * - pinned action buttons;
+     * - temporary pop-out action buttons for unpinned menu entries.
+     */
+    private static void scheduleRelocateExtensionsContainer(
+            Activity activity, Object coordinator, int attempt) {
+        if (activity == null || coordinator == null) {
+            return;
+        }
+
         activity.runOnUiThread(() -> {
             try {
-                Resources res = activity.getResources();
-
-                int extensionsButtonId = res.getIdentifier(
-                        "extensions_menu_button", "id", TARGET_PACKAGE);
-                if (extensionsButtonId == 0) {
-                    log("relocation skipped: extensions_menu_button id missing");
+                if (relocateExtensionsContainerToBottomBar(activity, coordinator)) {
                     return;
                 }
 
-                View extensionsButton = activity.findViewById(extensionsButtonId);
-                if (extensionsButton == null) {
-                    log("relocation skipped: extensions_menu_button not found");
-                    return;
-                }
-
-                // Android Bottom Bar 1A uses bottom_bar_container, not the
-                // legacy bottom_toolbar. Its layout is a horizontal LinearLayout
-                // with new-tab, tab-switcher and app-menu slots.
-                View bottomBar = findActivityViewByName(
-                        activity,
-                        "bottom_bar_container",
-                        "bottom_bar");
-
-                if (!(bottomBar instanceof LinearLayout)) {
-                    log("relocation skipped: Android Bottom Bar container not found; got "
-                            + (bottomBar == null
-                            ? "null"
-                            : bottomBar.getClass().getName()));
-                    return;
-                }
-
-                LinearLayout row = (LinearLayout) bottomBar;
-                if (extensionsButton.getParent() == row) {
-                    return;
-                }
-
-                View tabSwitcher = findNamedView(
-                        row,
-                        res,
-                        "tab_switcher_button");
-
-                int insertIndex = row.getChildCount();
-                if (tabSwitcher != null) {
-                    View directTabChild = directChildOf(row, tabSwitcher);
-                    if (directTabChild != null) {
-                        int tabIndex = row.indexOfChild(directTabChild);
-                        if (tabIndex >= 0) {
-                            insertIndex = tabIndex + 1;
-                        }
+                if (attempt < 20) {
+                    View decor = activity.getWindow() != null
+                            ? activity.getWindow().getDecorView()
+                            : null;
+                    if (decor != null) {
+                        decor.postDelayed(
+                                () -> scheduleRelocateExtensionsContainer(
+                                        activity, coordinator, attempt + 1),
+                                100L);
                     }
                 } else {
-                    View appMenu = findNamedView(
-                            row,
-                            res,
-                            "app_menu_button",
-                            "menu_button",
-                            "menu_button_wrapper",
-                            "app_menu_stub");
-                    if (appMenu != null) {
-                        View directMenuChild = directChildOf(row, appMenu);
-                        if (directMenuChild != null) {
-                            int menuIndex = row.indexOfChild(directMenuChild);
-                            if (menuIndex >= 0) {
-                                insertIndex = menuIndex;
-                            }
-                        }
-                    }
+                    log("bottom bar relocation gave up after 20 retries");
                 }
-
-                ViewGroup oldParent =
-                        extensionsButton.getParent() instanceof ViewGroup
-                                ? (ViewGroup) extensionsButton.getParent()
-                                : null;
-                if (oldParent != null) {
-                    oldParent.removeView(extensionsButton);
-                }
-
-                LinearLayout.LayoutParams buttonLp =
-                        new LinearLayout.LayoutParams(
-                                0,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                1.0f);
-
-                row.addView(
-                        extensionsButton,
-                        Math.min(insertIndex, row.getChildCount()),
-                        buttonLp);
-
-                extensionsButton.setVisibility(View.VISIBLE);
-                extensionsButton.setAlpha(1.0f);
-
-                collapseEmptyExtensionsToolbar(activity, oldParent);
-
-                log("moved extensions_menu_button into Android Bottom Bar "
-                        + "after tab_switcher_button; children=" + row.getChildCount());
             } catch (Throwable t) {
-                log("extensions button relocation failed: " + stackSummary(t));
+                log("extensions container relocation failed: " + stackSummary(t));
             }
         });
     }
 
-    private static View findActivityViewByName(
-            Activity activity,
-            String... names) {
-        Resources resources = activity.getResources();
-        for (String name : names) {
-            int id = resources.getIdentifier(name, "id", TARGET_PACKAGE);
-            if (id == 0) {
-                continue;
+    private static boolean relocateExtensionsContainerToBottomBar(
+            Activity activity, Object coordinator) throws Throwable {
+
+        Resources res = activity.getResources();
+        int containerId = res.getIdentifier(
+                "extensions_toolbar_container", "id", TARGET_PACKAGE);
+        int bottomBarId = res.getIdentifier(
+                "bottom_bar_container", "id", TARGET_PACKAGE);
+
+        if (containerId == 0 || bottomBarId == 0) {
+            log("relocation pending: extensions_toolbar_container or bottom_bar_container id missing");
+            return false;
+        }
+
+        View extensionsContainer = activity.findViewById(containerId);
+        View bottomBarView = activity.findViewById(bottomBarId);
+
+        if (!(extensionsContainer instanceof LinearLayout)) {
+            log("relocation pending: extensions_toolbar_container not inflated yet");
+            return false;
+        }
+
+        if (!(bottomBarView instanceof LinearLayout)) {
+            log("relocation pending: bottom_bar_container not available yet");
+            return false;
+        }
+
+        LinearLayout extensionsToolbar = (LinearLayout) extensionsContainer;
+        LinearLayout bottomBar = (LinearLayout) bottomBarView;
+
+        if (extensionsToolbar.getParent() != bottomBar) {
+            View tabSwitcher = findNamedView(
+                    bottomBar, res, "tab_switcher_button");
+
+            int insertIndex = bottomBar.getChildCount();
+            if (tabSwitcher != null) {
+                View directTabChild = directChildOf(bottomBar, tabSwitcher);
+                if (directTabChild != null) {
+                    int tabIndex = bottomBar.indexOfChild(directTabChild);
+                    if (tabIndex >= 0) {
+                        insertIndex = tabIndex + 1;
+                    }
+                }
+            } else {
+                View appMenu = findNamedView(
+                        bottomBar,
+                        res,
+                        "app_menu_button",
+                        "menu_button",
+                        "menu_button_wrapper",
+                        "app_menu_stub");
+                if (appMenu != null) {
+                    View directMenuChild = directChildOf(bottomBar, appMenu);
+                    if (directMenuChild != null) {
+                        int menuIndex = bottomBar.indexOfChild(directMenuChild);
+                        if (menuIndex >= 0) {
+                            insertIndex = menuIndex;
+                        }
+                    }
+                }
             }
-            View found = activity.findViewById(id);
-            if (found != null) {
-                log("found " + name + " as " + found.getClass().getName());
-                return found;
+
+            ViewGroup oldParent =
+                    extensionsToolbar.getParent() instanceof ViewGroup
+                            ? (ViewGroup) extensionsToolbar.getParent()
+                            : null;
+            if (oldParent != null) {
+                oldParent.removeView(extensionsToolbar);
             }
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT);
+            lp.gravity = android.view.Gravity.CENTER_VERTICAL;
+
+            bottomBar.addView(
+                    extensionsToolbar,
+                    Math.min(insertIndex, bottomBar.getChildCount()),
+                    lp);
+
+            extensionsToolbar.setVisibility(View.VISIBLE);
+            extensionsToolbar.setAlpha(1.0f);
+
+            log("moved complete extensions_toolbar_container into Android Bottom Bar");
+        }
+
+        // ExtensionActionListRecyclerView uses this root for transitions while
+        // temporarily popping out an unpinned action. The original phone toolbar
+        // is no longer the correct visual root after reparenting.
+        try {
+            Object actionListCoordinator =
+                    XposedHelpers.getObjectField(coordinator, "V");
+            if (actionListCoordinator != null) {
+                Object recycler = XposedHelpers.getObjectField(
+                        actionListCoordinator, "T");
+                if (recycler != null) {
+                    XposedHelpers.setObjectField(recycler, "I1", bottomBar);
+                }
+            }
+        } catch (Throwable t) {
+            log("could not rebind extension action transition root: "
+                    + stackSummary(t));
+        }
+
+        return true;
+    }
+
+    private static Activity unwrapActivity(Context context) {
+        Context current = context;
+        while (current != null) {
+            if (current instanceof Activity) {
+                return (Activity) current;
+            }
+            if (!(current instanceof ContextWrapper)) {
+                return null;
+            }
+            Context next = ((ContextWrapper) current).getBaseContext();
+            if (next == current) {
+                return null;
+            }
+            current = next;
         }
         return null;
     }
 
     private static View directChildOf(ViewGroup parent, View descendant) {
         View current = descendant;
-        while (current != null && current.getParent() instanceof View) {
-            ViewGroup currentParent =
-                    current.getParent() instanceof ViewGroup
-                            ? (ViewGroup) current.getParent()
-                            : null;
-            if (currentParent == parent) {
+        while (current != null) {
+            if (current.getParent() == parent) {
                 return current;
             }
             if (!(current.getParent() instanceof View)) {
-                break;
+                return null;
             }
             current = (View) current.getParent();
         }
         return null;
-    }
-
-    private static void collapseEmptyExtensionsToolbar(
-            Activity activity,
-            ViewGroup oldParent) {
-        try {
-            int containerId = activity.getResources().getIdentifier(
-                    "extensions_toolbar_container", "id", TARGET_PACKAGE);
-            View container =
-                    containerId != 0
-                            ? activity.findViewById(containerId)
-                            : null;
-
-            if (container instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) container;
-                boolean hasVisibleChild = false;
-                for (int i = 0; i < group.getChildCount(); i++) {
-                    View child = group.getChildAt(i);
-                    if (child.getVisibility() != View.GONE
-                            && child.getWidth() > 0) {
-                        hasVisibleChild = true;
-                        break;
-                    }
-                }
-                if (!hasVisibleChild) {
-                    group.setVisibility(View.GONE);
-                    ViewGroup.LayoutParams lp = group.getLayoutParams();
-                    if (lp != null) {
-                        lp.width = 0;
-                        group.setLayoutParams(lp);
-                    }
-                    log("collapsed empty extensions_toolbar_container");
-                }
-            } else if (oldParent != null && oldParent.getChildCount() == 0) {
-                oldParent.setVisibility(View.GONE);
-            }
-        } catch (Throwable t) {
-            log("could not collapse old extensions toolbar: " + stackSummary(t));
-        }
     }
 
     private static View findNamedView(
