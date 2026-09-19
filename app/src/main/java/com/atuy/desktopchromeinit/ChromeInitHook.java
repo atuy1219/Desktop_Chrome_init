@@ -739,6 +739,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                 FrameLayout content = (FrameLayout) contentView;
                 FrameLayout host = EXTENSIONS_BUTTON_HOSTS.get(activity);
+                boolean createdHost = false;
 
                 if (host == null) {
                     int size = Math.max(
@@ -774,6 +775,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     host.addView(extensionsButton, buttonLp);
 
                     EXTENSIONS_BUTTON_HOSTS.put(activity, host);
+                    createdHost = true;
                     log("moved real extensions_menu_button to bottom toolbar overlay");
                 } else if (extensionsButton.getParent() != host) {
                     ViewGroup currentParent =
@@ -804,13 +806,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                 // Bottom controls can translate/resize while scrolling. Pre-draw
                 // keeps the moved button visually attached to that row.
-                bottomToolbar.getViewTreeObserver().addOnPreDrawListener(() -> {
-                    if (finalHost.isAttachedToWindow()
-                            && finalBottomToolbar.isAttachedToWindow()) {
-                        position.run();
-                    }
-                    return true;
-                });
+                if (createdHost) {
+                    bottomToolbar.getViewTreeObserver().addOnPreDrawListener(() -> {
+                        if (finalHost.isAttachedToWindow()
+                                && finalBottomToolbar.isAttachedToWindow()) {
+                            position.run();
+                        }
+                        return true;
+                    });
+                }
             } catch (Throwable t) {
                 log("extensions button relocation failed: " + stackSummary(t));
             }
@@ -878,7 +882,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             host.setLayoutParams(lp);
         }
 
-        host.setTranslationY(bottomToolbar.getTranslationY());
         host.setVisibility(bottomToolbar.getVisibility());
         host.setAlpha(bottomToolbar.getAlpha());
     }
