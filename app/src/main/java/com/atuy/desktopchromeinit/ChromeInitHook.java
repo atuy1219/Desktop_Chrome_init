@@ -1242,14 +1242,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     .append(" shown=")
                     .append(recyclerView.isShown());
 
-            if (recyclerView instanceof androidx.recyclerview.widget.RecyclerView) {
-                androidx.recyclerview.widget.RecyclerView rv =
-                        (androidx.recyclerview.widget.RecyclerView) recyclerView;
-                out.append(" childCount=").append(rv.getChildCount());
-                if (rv.getAdapter() != null) {
-                    out.append(" itemCount=")
-                            .append(rv.getAdapter().getItemCount());
-                }
+            if (recyclerView instanceof ViewGroup) {
+                out.append(" childCount=")
+                        .append(((ViewGroup) recyclerView).getChildCount());
             }
 
             log(out.toString());
