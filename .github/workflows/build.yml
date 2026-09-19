@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,7 +18,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      # GitHub-hosted Ubuntu runners already provide ANDROID_HOME/ANDROID_SDK_ROOT
+      # and current Android SDK platforms/build-tools. Avoid setup-android@v3:
+      # its sdkmanager bootstrap currently tries to resolve the removed "tools"
+      # package and can fail before Gradle starts.
+      - name: Show Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_HOME/platforms" | tail -20
+          ls -la "$ANDROID_HOME/build-tools" | tail -20
 
       - uses: gradle/actions/setup-gradle@v4
         with:
