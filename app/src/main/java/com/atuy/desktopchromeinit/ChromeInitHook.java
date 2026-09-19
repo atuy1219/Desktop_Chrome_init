@@ -75,6 +75,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<View, Boolean> BOTTOM_BAR_SLOT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    /**
+     * RecyclerViews currently containing one temporary unpinned action that
+     * exists only to anchor an extension popup. This action must never consume
+     * another Bottom Bar slot, otherwise the native buttons move horizontally.
+     */
+    private static final Map<View, Boolean> TEMP_POPOUT_ACTION_LISTS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -977,11 +985,18 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 actionCount = ((ViewGroup) actionListView).getChildCount();
             }
 
-            // One slot for the Extensions menu itself, plus one logical slot
-            // for every pinned / temporarily popped-out action. The outer
-            // allocation stays even, but the icons inside that allocation are
-            // intentionally packed together rather than spread across it.
-            int extensionSlots = Math.max(1, actionCount + 1);
+            boolean hasTemporaryPopout =
+                    actionListView != null
+                            && Boolean.TRUE.equals(
+                                    TEMP_POPOUT_ACTION_LISTS.get(actionListView));
+
+            // Permanent geometry is based only on pinned actions. A temporary
+            // unpinned action used as a popup anchor is squeezed into the
+            // already-reserved Extensions region, so New Tab / Tab Switcher /
+            // app menu never move while a popup opens.
+            int pinnedActionCount = Math.max(
+                    0, actionCount - (hasTemporaryPopout ? 1 : 0));
+            int extensionSlots = Math.max(1, pinnedActionCount + 1);
 
             ViewGroup.LayoutParams containerBase =
                     extensionsToolbar.getLayoutParams();
@@ -1037,23 +1052,55 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         48f * res.getDisplayMetrics().density);
             }
 
+            int nativeSlots = 0;
+            for (int i = 0; i < bottomBar.getChildCount(); i++) {
+                View child = bottomBar.getChildAt(i);
+                if (child == extensionsToolbar
+                        || child.getVisibility() == View.GONE) {
+                    continue;
+                }
+                nativeSlots++;
+            }
+
+            int totalLogicalSlots = nativeSlots + extensionSlots;
+            int logicalSlotWidth =
+                    totalLogicalSlots > 0
+                            ? bottomBar.getWidth() / totalLogicalSlots
+                            : buttonWidth;
+            int extensionRegionWidth =
+                    Math.max(buttonWidth, logicalSlotWidth * extensionSlots);
+
+            int visibleExtensionButtons = actionCount + 1;
+            int packedButtonWidth = buttonWidth;
+            if (hasTemporaryPopout && visibleExtensionButtons > 0) {
+                // Keep the native slots frozen. During an unpinned popup the
+                // extra temporary icon shares the existing Extensions region
+                // with the menu button (and any pinned icons) instead of
+                // expanding that region.
+                packedButtonWidth = Math.max(
+                        Math.round(
+                                36f * res.getDisplayMetrics().density),
+                        extensionRegionWidth / visibleExtensionButtons);
+                packedButtonWidth = Math.min(buttonWidth, packedButtonWidth);
+            }
+
             if (menuButton != null) {
                 ViewGroup.LayoutParams old = menuButton.getLayoutParams();
                 LinearLayout.LayoutParams lp =
                         old instanceof LinearLayout.LayoutParams
                                 ? (LinearLayout.LayoutParams) old
                                 : new LinearLayout.LayoutParams(
-                                        buttonWidth,
+                                        packedButtonWidth,
                                         ViewGroup.LayoutParams.MATCH_PARENT);
-                if (lp.width != buttonWidth || lp.weight != 0f) {
-                    lp.width = buttonWidth;
+                if (lp.width != packedButtonWidth || lp.weight != 0f) {
+                    lp.width = packedButtonWidth;
                     lp.weight = 0f;
                     menuButton.setLayoutParams(lp);
                 }
             }
 
             if (actionListView != null) {
-                int wantedWidth = actionCount * buttonWidth;
+                int wantedWidth = actionCount * packedButtonWidth;
                 ViewGroup.LayoutParams old = actionListView.getLayoutParams();
                 LinearLayout.LayoutParams lp =
                         old instanceof LinearLayout.LayoutParams
@@ -1072,8 +1119,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     for (int i = 0; i < group.getChildCount(); i++) {
                         View child = group.getChildAt(i);
                         ViewGroup.LayoutParams childLp = child.getLayoutParams();
-                        if (childLp != null && childLp.width != buttonWidth) {
-                            childLp.width = buttonWidth;
+                        if (childLp != null && childLp.width != packedButtonWidth) {
+                            childLp.width = packedButtonWidth;
                             child.setLayoutParams(childLp);
                         }
                     }
@@ -1342,6 +1389,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                             POP_OUT_RECONCILING.set(Boolean.TRUE);
                             try {
+                                TEMP_POPOUT_ACTION_LISTS.clear();
+
                                 Method reconcile = param.thisObject.getClass()
                                         .getDeclaredMethod("g");
                                 reconcile.setAccessible(true);
@@ -1546,6 +1595,34 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
+        Object recycler = null;
+        try {
+            recycler = XposedHelpers.getObjectField(
+                    actionListCoordinator, "T");
+        } catch (Throwable ignored) {}
+
+        if (!(recycler instanceof View)) {
+            log("popup bridge: action RecyclerView not found");
+            return;
+        }
+
+        View recyclerView = (View) recycler;
+
+        boolean actionAlreadyVisible = false;
+        try {
+            Object existingAnchor =
+                    getButtonMethod.invoke(actionListCoordinator, actionId);
+            actionAlreadyVisible = existingAnchor instanceof View;
+        } catch (Throwable t) {
+            log("popup bridge: pre-reconcile anchor check failed: "
+                    + stackSummary(t));
+        }
+
+        if (!actionAlreadyVisible) {
+            TEMP_POPOUT_ACTION_LISTS.put(recyclerView, Boolean.TRUE);
+            log("popup bridge: temporary unpinned action will reuse existing Bottom Bar slot");
+        }
+
         // requestShowPopup()/requestActionVisibility() has already run by the
         // time this after-hook executes, so mPoppedOutActionId is populated.
         // The Phone toolbar never calls the Desktop width consumers, and R8
@@ -1562,22 +1639,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             refresh.invoke(extensionsToolbarBridge);
             log("popup bridge: forced action-list reconcile via onPinnedActionsChanged()");
         } catch (Throwable t) {
+            if (!actionAlreadyVisible) {
+                TEMP_POPOUT_ACTION_LISTS.remove(recyclerView);
+            }
             log("popup bridge: reconcile trigger failed: " + stackSummary(t));
             return;
         }
-
-        Object recycler = null;
-        try {
-            recycler = XposedHelpers.getObjectField(
-                    actionListCoordinator, "T");
-        } catch (Throwable ignored) {}
-
-        if (!(recycler instanceof View)) {
-            log("popup bridge: action RecyclerView not found");
-            return;
-        }
-
-        View recyclerView = (View) recycler;
         recyclerView.requestLayout();
 
         log("popup bridge: waiting for temporary action anchor " + actionId);
