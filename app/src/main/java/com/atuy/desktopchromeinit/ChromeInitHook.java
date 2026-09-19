@@ -1,0 +1,575 @@
+package com.atuy.desktopchromeinit;
+
+import android.app.Activity;
+import android.content.res.Resources;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewStub;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+/**
+ * Build-specific repair for Google Chrome Desktop Android 153.0.8010.49
+ * (versionCode 801004974).
+ *
+ * APK findings used by this hook:
+ *
+ * ChromeTabbedActivity.a3(...)
+ *   -> zd4.P2() : hns
+ *   -> hns.J1   : rr9
+ *   -> rr9.f0 = true
+ *
+ * rr9 is ExtensionsToolbarCoordinatorImpl.
+ * hns is ToolbarManager.
+ * hns.l(...) is ToolbarManager.initializeWithNative(...).
+ *
+ * The normal hns.l creation block is skipped when either the extensions
+ * ViewStub is absent or hns.D1.get() returns null.
+ */
+public final class ChromeInitHook implements IXposedHookLoadPackage {
+    private static final String TAG = "DesktopChromeInit";
+    private static final String TARGET_PACKAGE = "com.android.chrome";
+
+    // Resource IDs observed directly in 801004974. Names are preferred and
+    // these values are only fallbacks for this exact build.
+    private static final int FALLBACK_EXTENSIONS_MENU_ID = 0x7f01054d;
+    private static final int FALLBACK_EXTENSIONS_STUB_ID = 0x7f01056a;
+    private static final int FALLBACK_EXTENSIONS_LAYOUT_ID = 0x7f0e0190;
+
+    private static volatile ClassLoader chromeClassLoader;
+
+    /**
+     * hns.l() receives two objects which Chrome captures into the synthetic
+     * ums Supplier used to build rr9. Keep them weakly keyed by ToolbarManager
+     * so the repair can reproduce Chrome's own construction path later.
+     */
+    private static final Map<Object, InitCapture> INIT_CAPTURES =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
+            new ThreadLocal<>();
+
+    private static final class InitCapture {
+        final Object contextMenuFactory;
+        final Object extensionSupport;
+
+        InitCapture(Object contextMenuFactory, Object extensionSupport) {
+            this.contextMenuFactory = contextMenuFactory;
+            this.extensionSupport = extensionSupport;
+        }
+    }
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (!TARGET_PACKAGE.equals(lpparam.packageName)
+                || !TARGET_PACKAGE.equals(lpparam.processName)) {
+            return;
+        }
+
+        chromeClassLoader = lpparam.classLoader;
+        log("loading into " + lpparam.processName);
+
+        installToolbarInitCapture(lpparam.classLoader);
+        installExtensionsMenuRepair(lpparam.classLoader);
+    }
+
+    /**
+     * Capture the two initializeWithNative arguments that are otherwise only
+     * available as local variables inside hns.l().
+     */
+    private static void installToolbarInitCapture(ClassLoader classLoader) {
+        Class<?> toolbarManager = XposedHelpers.findClassIfExists("hns", classLoader);
+        if (toolbarManager == null) {
+            log("hns not found; target Chrome obfuscation does not match");
+            return;
+        }
+
+        XposedBridge.hookAllMethods(toolbarManager, "l", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                // 801004974:
+                // hns.l(mfe, i2q, Runnable, OnClickListener, fbi, fbi,
+                //       ydt, ki4, dp4)
+                if (param.args == null || param.args.length != 9) {
+                    return;
+                }
+
+                // The original method moves p8 and p9 into ums.W and ums.X.
+                INIT_CAPTURES.put(
+                        param.thisObject,
+                        new InitCapture(param.args[7], param.args[8])
+                );
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                try {
+                    Object coordinator = XposedHelpers.getObjectField(
+                            param.thisObject, "J1");
+                    if (coordinator == null) {
+                        log("initializeWithNative finished with hns.J1 == null");
+                    } else {
+                        log("Extensions coordinator initialized normally");
+                    }
+                } catch (Throwable t) {
+                    log("could not inspect hns.J1 after init: " + t);
+                }
+            }
+        });
+    }
+
+    private static void installExtensionsMenuRepair(ClassLoader classLoader) {
+        Class<?> chromeTabbedActivity = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.ChromeTabbedActivity",
+                classLoader
+        );
+        if (chromeTabbedActivity == null) {
+            log("ChromeTabbedActivity not found");
+            return;
+        }
+
+        XposedBridge.hookAllMethods(chromeTabbedActivity, "a3", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args == null
+                        || param.args.length != 4
+                        || !(param.args[0] instanceof Integer)
+                        || !(param.thisObject instanceof Activity)) {
+                    return;
+                }
+
+                Activity activity = (Activity) param.thisObject;
+                int id = (Integer) param.args[0];
+                if (!isExtensionsMenuAction(activity, id)) {
+                    return;
+                }
+
+                EXTENSIONS_ACTION.set(Boolean.TRUE);
+
+                try {
+                    Object toolbarManager = XposedHelpers.callMethod(
+                            activity, "P2");
+                    if (toolbarManager == null) {
+                        log("P2() returned null ToolbarManager");
+                        param.setResult(true);
+                        return;
+                    }
+
+                    Object coordinator = XposedHelpers.getObjectField(
+                            toolbarManager, "J1");
+                    if (coordinator != null) {
+                        return;
+                    }
+
+                    log("Extensions action hit with hns.J1 == null; repairing");
+
+                    if (!repairCoordinator(activity, toolbarManager)) {
+                        // Do not let the known rr9.f0 NPE terminate Chrome.
+                        log("repair incomplete; suppressing Extensions action");
+                        param.setResult(true);
+                    }
+                } catch (Throwable t) {
+                    log("repair hook failed: " + stackSummary(t));
+                    param.setResult(true);
+                }
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                boolean extensionAction = Boolean.TRUE.equals(
+                        EXTENSIONS_ACTION.get());
+                EXTENSIONS_ACTION.remove();
+
+                if (!extensionAction) {
+                    return;
+                }
+
+                Throwable t = param.getThrowable();
+                if (t instanceof NullPointerException) {
+                    log("suppressed known Extensions-menu NPE: "
+                            + stackSummary(t));
+                    param.setResult(true);
+                }
+            }
+        });
+    }
+
+    private static boolean isExtensionsMenuAction(Activity activity, int id) {
+        try {
+            String entryName = activity.getResources().getResourceEntryName(id);
+            if ("extensions_menu_menu_id".equals(entryName)) {
+                return true;
+            }
+        } catch (Resources.NotFoundException ignored) {
+            // Fall back to the exact ID decoded from 801004974.
+        }
+        return id == FALLBACK_EXTENSIONS_MENU_ID;
+    }
+
+    private static boolean repairCoordinator(
+            Activity activity, Object toolbarManager) throws Throwable {
+
+        Object existing = XposedHelpers.getObjectField(toolbarManager, "J1");
+        if (existing != null) {
+            return true;
+        }
+
+        InitCapture capture = INIT_CAPTURES.get(toolbarManager);
+        if (capture == null) {
+            log("no hns.l() capture; force-stop Chrome after enabling module");
+            return false;
+        }
+
+        Object chromeAndroidTask = getChromeAndroidTask(toolbarManager);
+        if (chromeAndroidTask == null) {
+            log("hns.D1.get() == null; retrying ChromeActivity.S2()");
+            retryChromeAndroidTaskInitialization(activity);
+            chromeAndroidTask = getChromeAndroidTask(toolbarManager);
+        }
+
+        if (chromeAndroidTask == null) {
+            log("ChromeAndroidTask is still null");
+            return false;
+        }
+
+        ViewStub stub = ensureExtensionsStub(activity, toolbarManager);
+        if (stub == null) {
+            log("could not obtain/create extensions_toolbar_container_stub");
+            return false;
+        }
+
+        Object coordinator = createCoordinatorThroughChrome(
+                toolbarManager,
+                chromeAndroidTask,
+                stub,
+                capture
+        );
+
+        if (coordinator == null) {
+            log("Chrome coordinator factory returned null");
+            return false;
+        }
+
+        XposedHelpers.setObjectField(toolbarManager, "J1", coordinator);
+        registerCoordinatorWithToolbar(toolbarManager, coordinator);
+
+        Object verify = XposedHelpers.getObjectField(toolbarManager, "J1");
+        boolean repaired = verify != null;
+        log(repaired
+                ? "repair successful: hns.J1 initialized"
+                : "repair failed: hns.J1 remained null");
+        return repaired;
+    }
+
+    /**
+     * hns.D1 is the Supplier used by ToolbarManager.initializeWithNative().
+     */
+    private static Object getChromeAndroidTask(Object toolbarManager) {
+        try {
+            Object supplier = XposedHelpers.getObjectField(
+                    toolbarManager, "D1");
+            if (supplier == null) {
+                return null;
+            }
+            return XposedHelpers.callMethod(supplier, "get");
+        } catch (Throwable t) {
+            log("reading hns.D1 failed: " + t);
+            return null;
+        }
+    }
+
+    /**
+     * ChromeTabbedActivity.A() calls:
+     *   S2(0, F3, O2)
+     * during startup. If the task supplier was not populated at that moment,
+     * retry that same Chrome-owned initialization route.
+     */
+    private static void retryChromeAndroidTaskInitialization(Activity activity) {
+        try {
+            int taskId = XposedHelpers.getIntField(activity, "F3");
+            Object tabModelSelector = XposedHelpers.getObjectField(
+                    activity, "O2");
+            if (tabModelSelector == null) {
+                log("cannot retry S2(): O2 is null");
+                return;
+            }
+
+            XposedHelpers.callMethod(
+                    activity,
+                    "S2",
+                    0,
+                    taskId,
+                    tabModelSelector
+            );
+            log("retried ChromeActivity.S2(0, F3, O2)");
+        } catch (Throwable t) {
+            log("ChromeActivity.S2 retry failed: " + stackSummary(t));
+        }
+    }
+
+    /**
+     * hns.l() searches hns.d0 (ToolbarControlContainer) for
+     * extensions_toolbar_container_stub. Phone layouts can omit that stub,
+     * which causes Chrome to skip coordinator construction.
+     */
+    private static ViewStub ensureExtensionsStub(
+            Activity activity, Object toolbarManager) {
+
+        try {
+            Object containerObject = XposedHelpers.getObjectField(
+                    toolbarManager, "d0");
+            if (!(containerObject instanceof View)) {
+                log("hns.d0 is not a View");
+                return null;
+            }
+
+            View container = (View) containerObject;
+            Resources resources = activity.getResources();
+
+            int stubId = resources.getIdentifier(
+                    "extensions_toolbar_container_stub",
+                    "id",
+                    TARGET_PACKAGE
+            );
+            if (stubId == 0) {
+                stubId = FALLBACK_EXTENSIONS_STUB_ID;
+            }
+
+            View existing = container.findViewById(stubId);
+            if (existing instanceof ViewStub) {
+                return (ViewStub) existing;
+            }
+
+            if (existing != null) {
+                log("extensions stub ID exists but is "
+                        + existing.getClass().getName());
+                return null;
+            }
+
+            if (!(container instanceof ViewGroup)) {
+                log("ToolbarControlContainer is not a ViewGroup");
+                return null;
+            }
+
+            int layoutId = resources.getIdentifier(
+                    "extensions_toolbar_container",
+                    "layout",
+                    TARGET_PACKAGE
+            );
+            if (layoutId == 0) {
+                layoutId = FALLBACK_EXTENSIONS_LAYOUT_ID;
+            }
+
+            ViewStub injected = new ViewStub(container.getContext());
+            injected.setId(stubId);
+            injected.setLayoutResource(layoutId);
+
+            ViewGroup group = (ViewGroup) container;
+            try {
+                group.addView(injected);
+            } catch (Throwable first) {
+                group.addView(
+                        injected,
+                        new ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                );
+            }
+
+            log("injected extensions_toolbar_container_stub");
+            return injected;
+        } catch (Throwable t) {
+            log("stub repair failed: " + stackSummary(t));
+            return null;
+        }
+    }
+
+    /**
+     * Reproduce only the rr9 creation block from hns.l().
+     *
+     * Original 801004974 flow:
+     *   profile = hns.t0.h().f()
+     *   key = new se4(rr9.class, profile, (wl) hns.X0)
+     *   factory = new ums(...)
+     *   rr9 = (rr9) bf4.e(key, factory)
+     *   hns.J1 = rr9
+     */
+    private static Object createCoordinatorThroughChrome(
+            Object toolbarManager,
+            Object chromeAndroidTask,
+            ViewStub stub,
+            InitCapture capture) throws Throwable {
+
+        ClassLoader cl = chromeClassLoader;
+        Class<?> rr9Class = XposedHelpers.findClass("rr9", cl);
+        Class<?> se4Class = XposedHelpers.findClass("se4", cl);
+        Class<?> umsClass = XposedHelpers.findClass("ums", cl);
+        Class<?> cmsClass = XposedHelpers.findClass("cms", cl);
+
+        Object tabModelSelector = XposedHelpers.getObjectField(
+                toolbarManager, "t0");
+        if (tabModelSelector == null) {
+            log("hns.t0 == null");
+            return null;
+        }
+
+        Object tabModel = XposedHelpers.callMethod(tabModelSelector, "h");
+        if (tabModel == null) {
+            log("hns.t0.h() == null");
+            return null;
+        }
+
+        Object profile = XposedHelpers.callMethod(tabModel, "f");
+        if (profile == null) {
+            log("TabModel.f() profile == null");
+            return null;
+        }
+
+        Object windowAndroid = XposedHelpers.getObjectField(
+                toolbarManager, "X0");
+        if (windowAndroid == null) {
+            log("hns.X0 == null");
+            return null;
+        }
+
+        Object key = XposedHelpers.newInstance(
+                se4Class,
+                rr9Class,
+                profile,
+                windowAndroid
+        );
+
+        // hns.l() creates cms(byte 8), stores hns in cms.T, and captures the
+        // Runnable into ums.Y.
+        Object initRunnable = XposedHelpers.newInstance(
+                cmsClass, (byte) 8);
+        XposedHelpers.setObjectField(
+                initRunnable, "T", toolbarManager);
+
+        // ums has no declared constructor in the optimized DEX. Chrome itself
+        // allocates it then directly invokes Object.<init>(); Unsafe gives us
+        // the same zero-initialized instance without inventing a constructor.
+        Object supplier = allocateWithoutConstructor(umsClass);
+
+        XposedHelpers.setObjectField(supplier, "S", toolbarManager);
+        XposedHelpers.setObjectField(supplier, "T", stub);
+        XposedHelpers.setObjectField(
+                supplier, "U", chromeAndroidTask);
+        XposedHelpers.setObjectField(supplier, "V", profile);
+        XposedHelpers.setObjectField(
+                supplier, "W", capture.contextMenuFactory);
+        XposedHelpers.setObjectField(
+                supplier, "X", capture.extensionSupport);
+        XposedHelpers.setObjectField(supplier, "Y", initRunnable);
+
+        Object coordinator = XposedHelpers.callMethod(
+                chromeAndroidTask, "e", key, supplier);
+
+        if (coordinator == null) {
+            return null;
+        }
+
+        if (!rr9Class.isInstance(coordinator)) {
+            log("factory returned unexpected class: "
+                    + coordinator.getClass().getName());
+            return null;
+        }
+
+        return coordinator;
+    }
+
+    /**
+     * hns.l() additionally calls hns.b0.T.Y(rr9) after successful creation.
+     * Keep that side effect because it wires the coordinator back into the
+     * surrounding toolbar state.
+     */
+    private static void registerCoordinatorWithToolbar(
+            Object toolbarManager, Object coordinator) {
+        try {
+            Object trs = XposedHelpers.getObjectField(
+                    toolbarManager, "b0");
+            if (trs == null) {
+                return;
+            }
+
+            Object ols = XposedHelpers.getObjectField(trs, "T");
+            if (ols == null) {
+                return;
+            }
+
+            XposedHelpers.callMethod(ols, "Y", coordinator);
+        } catch (Throwable t) {
+            // The coordinator itself is already installed. Keep the menu
+            // usable even if this secondary registration changes later.
+            log("secondary toolbar registration failed: "
+                    + stackSummary(t));
+        }
+    }
+
+    private static Object allocateWithoutConstructor(Class<?> type)
+            throws Throwable {
+        Throwable firstFailure = null;
+
+        for (String unsafeName : new String[]{
+                "sun.misc.Unsafe",
+                "jdk.internal.misc.Unsafe"
+        }) {
+            try {
+                Class<?> unsafeClass = Class.forName(unsafeName);
+                Field field;
+                try {
+                    field = unsafeClass.getDeclaredField("theUnsafe");
+                } catch (NoSuchFieldException e) {
+                    field = unsafeClass.getDeclaredField("THE_ONE");
+                }
+                field.setAccessible(true);
+                Object unsafe = field.get(null);
+
+                Method allocateInstance = unsafeClass.getDeclaredMethod(
+                        "allocateInstance", Class.class);
+                allocateInstance.setAccessible(true);
+                return allocateInstance.invoke(unsafe, type);
+            } catch (Throwable t) {
+                if (firstFailure == null) {
+                    firstFailure = t;
+                }
+            }
+        }
+
+        throw new IllegalStateException(
+                "Unable to allocate " + type.getName()
+                        + " without constructor",
+                firstFailure
+        );
+    }
+
+    private static String stackSummary(Throwable t) {
+        StringBuilder out = new StringBuilder();
+        out.append(t.getClass().getName());
+        if (t.getMessage() != null) {
+            out.append(": ").append(t.getMessage());
+        }
+
+        StackTraceElement[] stack = t.getStackTrace();
+        int max = Math.min(stack.length, 4);
+        for (int i = 0; i < max; i++) {
+            out.append(" | ").append(stack[i]);
+        }
+        return out.toString();
+    }
+
+    private static void log(String message) {
+        XposedBridge.log(TAG + ": " + message);
+    }
+}
