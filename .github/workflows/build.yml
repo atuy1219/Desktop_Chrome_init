@@ -32,21 +32,32 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build release APK
+      - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      # The release variant has no signingConfig, so AGP normally emits
-      # app-release-unsigned.apk. Normalize the filename for the artifact.
-      - name: Collect APK
+      - name: Collect and verify APK
         run: |
           set -euo pipefail
-          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' -print -quit)"
           if [ -z "$APK" ]; then
-            echo "No APK found under app/build/outputs/apk/release"
+            echo "No signed APK found under app/build/outputs/apk/release"
             find app/build/outputs -maxdepth 5 -type f -print || true
             exit 1
           fi
-          echo "Generated APK: $APK"
+
+          echo "Generated signed APK: $APK"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "apksigner not found: $APKSIGNER"
+            exit 1
+          fi
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
           cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
           ls -lh app/build/outputs/DesktopChromeInit-release.apk
 
