@@ -476,8 +476,64 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 supplier, "X", capture.extensionSupport);
         XposedHelpers.setObjectField(supplier, "Y", initRunnable);
 
-        Object coordinator = XposedHelpers.callMethod(
-                chromeAndroidTask, "e", key, supplier);
+        // Extensions in this Desktop build assumes ToolbarTablet during
+        // construction. On a phone, hns.c0 is ToolbarPhone, and ums.get()
+        // performs a hard cast to ToolbarTablet even though it only keeps that
+        // value as a ViewGroup parent for RecyclerView transitions.
+        //
+        // Temporarily provide a minimal ToolbarTablet instance for the factory,
+        // restore the real ToolbarPhone immediately afterwards, then replace
+        // the retained ViewGroup reference with the real toolbar.
+        Object realToolbar = XposedHelpers.getObjectField(toolbarManager, "c0");
+        Object temporaryTablet = null;
+        boolean toolbarSwapped = false;
+
+        Class<?> toolbarTabletClass = XposedHelpers.findClass(
+                "org.chromium.chrome.browser.toolbar.top.ToolbarTablet", cl);
+
+        if (realToolbar != null
+                && !toolbarTabletClass.isInstance(realToolbar)) {
+            if (!(realToolbar instanceof ViewGroup)) {
+                log("hns.c0 is neither ToolbarTablet nor ViewGroup: "
+                        + realToolbar.getClass().getName());
+                return null;
+            }
+
+            java.lang.reflect.Constructor<?> constructor =
+                    toolbarTabletClass.getDeclaredConstructor(
+                            android.content.Context.class,
+                            android.util.AttributeSet.class);
+            constructor.setAccessible(true);
+
+            temporaryTablet = constructor.newInstance(
+                    ((View) realToolbar).getContext(),
+                    null
+            );
+
+            XposedHelpers.setObjectField(
+                    toolbarManager, "c0", temporaryTablet);
+            toolbarSwapped = true;
+            log("temporarily substituted ToolbarTablet for ToolbarPhone");
+        }
+
+        Object coordinator;
+        try {
+            Class<?> bf4Class = XposedHelpers.findClass("bf4", cl);
+            java.lang.reflect.Method factoryMethod =
+                    bf4Class.getDeclaredMethod(
+                            "e",
+                            se4Class,
+                            java.util.function.Supplier.class);
+            factoryMethod.setAccessible(true);
+            coordinator = factoryMethod.invoke(
+                    chromeAndroidTask, key, supplier);
+        } finally {
+            if (toolbarSwapped) {
+                XposedHelpers.setObjectField(
+                        toolbarManager, "c0", realToolbar);
+                log("restored real ToolbarPhone after coordinator construction");
+            }
+        }
 
         if (coordinator == null) {
             return null;
@@ -487,6 +543,25 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("factory returned unexpected class: "
                     + coordinator.getClass().getName());
             return null;
+        }
+
+        if (toolbarSwapped && realToolbar instanceof ViewGroup) {
+            try {
+                Object actionListCoordinator =
+                        XposedHelpers.getObjectField(coordinator, "V");
+                if (actionListCoordinator != null) {
+                    Object recycler = XposedHelpers.getObjectField(
+                            actionListCoordinator, "T");
+                    if (recycler != null) {
+                        XposedHelpers.setObjectField(
+                                recycler, "I1", realToolbar);
+                        log("rebound Extensions RecyclerView parent to ToolbarPhone");
+                    }
+                }
+            } catch (Throwable t) {
+                log("failed to rebind Extensions RecyclerView parent: "
+                        + stackSummary(t));
+            }
         }
 
         return coordinator;
