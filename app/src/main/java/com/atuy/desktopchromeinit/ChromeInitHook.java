@@ -988,28 +988,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 actionCount = ((ViewGroup) actionListView).getChildCount();
             }
 
-            boolean hasTemporaryPopout =
-                    actionListView != null
-                            && Boolean.TRUE.equals(
-                                    TEMP_POPOUT_ACTION_LISTS.get(actionListView));
-
-            // Permanent geometry is based only on pinned actions. A temporary
-            // unpinned action used as a popup anchor is squeezed into the
-            // already-reserved Extensions region, so New Tab / Tab Switcher /
-            // app menu never move while a popup opens.
-            int pinnedActionCount;
-            if (hasTemporaryPopout) {
-                Integer baseCount =
-                        TEMP_POPOUT_BASE_ACTION_COUNTS.get(actionListView);
-                pinnedActionCount =
-                        baseCount != null
-                                ? Math.max(0, baseCount)
-                                : Math.max(0, actionCount - 1);
-            } else {
-                pinnedActionCount = Math.max(0, actionCount);
-            }
-            int extensionSlots = Math.max(1, pinnedActionCount + 1);
-
+            // The native Bottom Bar geometry must never depend on extension
+            // state. New Tab / Tab Switcher / Extensions / app menu are always
+            // four equal parent slots. Pinned actions and temporary popup
+            // actions are packed *inside* the single Extensions slot and may
+            // visually overflow it without changing sibling positions.
             ViewGroup.LayoutParams containerBase =
                     extensionsToolbar.getLayoutParams();
             LinearLayout.LayoutParams containerLp;
@@ -1022,23 +1005,24 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
             boolean containerChanged =
                     containerLp.width != 0
-                            || containerLp.weight != extensionSlots
+                            || containerLp.weight != 1.0f
                             || containerLp.height
                                     != ViewGroup.LayoutParams.MATCH_PARENT;
             containerLp.width = 0;
             containerLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
-            containerLp.weight = extensionSlots;
+            containerLp.weight = 1.0f;
             containerLp.gravity = android.view.Gravity.CENTER_VERTICAL;
             if (containerChanged) {
                 extensionsToolbar.setLayoutParams(containerLp);
             }
 
-            // Center the whole compact Extensions cluster inside its logical
-            // N-slot allocation. This produces:
-            //   o   o   o   o
-            //   o   o   oo  o
-            // instead of stretching the two extension icons apart.
+            // Allow the compact extension cluster to spill a little outside
+            // its logical slot instead of resizing the whole Bottom Bar.
             extensionsToolbar.setGravity(android.view.Gravity.CENTER);
+            extensionsToolbar.setClipChildren(false);
+            extensionsToolbar.setClipToPadding(false);
+            bottomBar.setClipChildren(false);
+            bottomBar.setClipToPadding(false);
 
             int buttonWidth = 0;
             View referenceButton = findNamedView(
@@ -1064,37 +1048,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         48f * res.getDisplayMetrics().density);
             }
 
-            int nativeSlots = 0;
-            for (int i = 0; i < bottomBar.getChildCount(); i++) {
-                View child = bottomBar.getChildAt(i);
-                if (child == extensionsToolbar
-                        || child.getVisibility() == View.GONE) {
-                    continue;
-                }
-                nativeSlots++;
-            }
-
-            int totalLogicalSlots = nativeSlots + extensionSlots;
-            int logicalSlotWidth =
-                    totalLogicalSlots > 0
-                            ? bottomBar.getWidth() / totalLogicalSlots
-                            : buttonWidth;
-            int extensionRegionWidth =
-                    Math.max(buttonWidth, logicalSlotWidth * extensionSlots);
-
-            int visibleExtensionButtons = actionCount + 1;
+            // Each extension button keeps normal toolbar-button touch width.
+            // Because the LinearLayout is centered and has no inter-item
+            // margins, pinned action + Extensions appears as a tight "oo"
+            // cluster while the surrounding native buttons stay put.
             int packedButtonWidth = buttonWidth;
-            if (hasTemporaryPopout && visibleExtensionButtons > 0) {
-                // Keep the native slots frozen. During an unpinned popup the
-                // extra temporary icon shares the existing Extensions region
-                // with the menu button (and any pinned icons) instead of
-                // expanding that region.
-                packedButtonWidth = Math.max(
-                        Math.round(
-                                36f * res.getDisplayMetrics().density),
-                        extensionRegionWidth / visibleExtensionButtons);
-                packedButtonWidth = Math.min(buttonWidth, packedButtonWidth);
-            }
 
             if (menuButton != null) {
                 ViewGroup.LayoutParams old = menuButton.getLayoutParams();
@@ -1104,9 +1062,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 : new LinearLayout.LayoutParams(
                                         packedButtonWidth,
                                         ViewGroup.LayoutParams.MATCH_PARENT);
-                if (lp.width != packedButtonWidth || lp.weight != 0f) {
+                if (lp.width != packedButtonWidth
+                        || lp.weight != 0f
+                        || lp.leftMargin != 0
+                        || lp.rightMargin != 0) {
                     lp.width = packedButtonWidth;
                     lp.weight = 0f;
+                    lp.leftMargin = 0;
+                    lp.rightMargin = 0;
+                    lp.setMarginStart(0);
+                    lp.setMarginEnd(0);
                     menuButton.setLayoutParams(lp);
                 }
             }
@@ -1120,18 +1085,29 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 : new LinearLayout.LayoutParams(
                                         wantedWidth,
                                         ViewGroup.LayoutParams.MATCH_PARENT);
-                if (lp.width != wantedWidth || lp.weight != 0f) {
+                if (lp.width != wantedWidth
+                        || lp.weight != 0f
+                        || lp.leftMargin != 0
+                        || lp.rightMargin != 0) {
                     lp.width = wantedWidth;
                     lp.weight = 0f;
+                    lp.leftMargin = 0;
+                    lp.rightMargin = 0;
+                    lp.setMarginStart(0);
+                    lp.setMarginEnd(0);
                     actionListView.setLayoutParams(lp);
                 }
 
                 if (actionListView instanceof ViewGroup && actionCount > 0) {
                     ViewGroup group = (ViewGroup) actionListView;
+                    group.setClipChildren(false);
+                    group.setClipToPadding(false);
+
                     for (int i = 0; i < group.getChildCount(); i++) {
                         View child = group.getChildAt(i);
                         ViewGroup.LayoutParams childLp = child.getLayoutParams();
-                        if (childLp != null && childLp.width != packedButtonWidth) {
+                        if (childLp != null
+                                && childLp.width != packedButtonWidth) {
                             childLp.width = packedButtonWidth;
                             child.setLayoutParams(childLp);
                         }
