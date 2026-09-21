@@ -331,7 +331,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     Object coordinator = findExtensionsCoordinator(manager);
                     if (coordinator != null) {
                         ACTIVE_COORDINATORS.put(activity, coordinator);
-                        rebindExtensionTransitionRoot(activity, coordinator);
                         scheduleRelocateExtensionsContainer(
                                 activity, coordinator, 0);
                         log("Chrome-owned extensions initialization succeeded");
@@ -585,17 +584,22 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         return;
                     }
 
-                    Object coordinator = XposedHelpers.getObjectField(
-                            toolbarManager, "J1");
+                    Object coordinator = findExtensionsCoordinator(toolbarManager);
                     if (coordinator != null) {
                         return;
                     }
 
-                    log("Extensions action hit with ToolbarManager.J1 == null; repairing");
-
-                    if (!repairCoordinator(activity, toolbarManager)) {
-                        // Do not let the known rr9.f0 NPE terminate Chrome.
-                        log("repair incomplete; suppressing Extensions action");
+                    String managerName = toolbarManager.getClass().getName();
+                    if ("hns".equals(managerName) || "jns".equals(managerName)) {
+                        log("Extensions action hit without coordinator; using known-build fallback");
+                        if (!repairCoordinator(activity, toolbarManager)) {
+                            log("repair incomplete; suppressing Extensions action");
+                            param.setResult(true);
+                        }
+                    } else {
+                        // Unknown builds use the Chrome-owned structural startup
+                        // path. Never guess synthetic R8 names from a menu click.
+                        log("Extensions action hit without coordinator on unknown build; suppressing unsafe action");
                         param.setResult(true);
                     }
                 } catch (Throwable t) {
@@ -753,14 +757,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             Activity activity, Object toolbarManager) {
 
         try {
-            Object containerObject = XposedHelpers.getObjectField(
-                    toolbarManager, "d0");
-            if (!(containerObject instanceof View)) {
-                log("ToolbarManager.d0 is not a View");
+            View container = findToolbarControlContainer(toolbarManager);
+            if (container == null) {
+                log("ToolbarControlContainer not found structurally");
                 return null;
             }
-
-            View container = (View) containerObject;
             Resources resources = activity.getResources();
 
             int stubId = resources.getIdentifier(
@@ -1283,22 +1284,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         configureBottomBarEqualSlots(bottomBar, extensionsToolbar);
 
-        // ExtensionActionListRecyclerView uses this root for transitions while
-        // temporarily popping out an unpinned action. The original phone toolbar
-        // is no longer the correct visual root after reparenting.
-        try {
-            Object actionListCoordinator =
-                    XposedHelpers.getObjectField(coordinator, "V");
-            if (actionListCoordinator != null) {
-                Object recycler = XposedHelpers.getObjectField(
-                        actionListCoordinator, "T");
-                if (recycler != null) {
-                    XposedHelpers.setObjectField(recycler, "I1", bottomBar);
-                }
-            }
-        } catch (Throwable t) {
-            log("could not rebind extension action transition root: "
-                    + stackSummary(t));
+        // Rebind ExtensionActionListRecyclerView's transition root without
+        // relying on obfuscated coordinator/field names.
+        View actionList = findNamedView(
+                extensionsToolbar, res, "extension_action_list");
+        if (actionList != null) {
+            rebindTransitionRoot(actionList, bottomBar);
         }
 
         return true;
@@ -1581,19 +1572,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     });
         }
 
-        try {
-            Object actionListCoordinator =
-                    XposedHelpers.getObjectField(coordinator, "V");
-            if (actionListCoordinator != null) {
-                Object recycler = XposedHelpers.getObjectField(
-                        actionListCoordinator, "T");
-                if (recycler != null) {
-                    XposedHelpers.setObjectField(
-                            recycler, "I1", actionButtons);
-                }
-            }
-        } catch (Throwable t) {
-            log("CCT transition-root rebind failed: " + stackSummary(t));
+        View actionList = findNamedView(
+                extensionsToolbar, res, "extension_action_list");
+        if (actionList != null) {
+            rebindTransitionRoot(actionList, actionButtons);
         }
 
         return true;
@@ -1668,6 +1650,102 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         extensionsToolbar.setVisibility(View.VISIBLE);
         extensionsToolbar.setAlpha(1.0f);
         extensionsToolbar.bringToFront();
+    }
+
+    private static void rebindTransitionRoot(
+            View actionListView, ViewGroup newRoot) {
+        if (actionListView == null || newRoot == null) {
+            return;
+        }
+
+        // Known-build fast path.
+        try {
+            Object old = XposedHelpers.getObjectField(actionListView, "I1");
+            if (old instanceof ViewGroup) {
+                XposedHelpers.setObjectField(actionListView, "I1", newRoot);
+                return;
+            }
+        } catch (Throwable ignored) {}
+
+        // Structural fallback: ExtensionActionListRecyclerView retains a
+        // ViewGroup transition root that initially points at ToolbarPhone /
+        // ToolbarTablet. Replace that field by identity/type rather than name.
+        Class<?> type = actionListView.getClass();
+        while (type != null) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    field.setAccessible(true);
+                    Object value = field.get(actionListView);
+                    if (!(value instanceof ViewGroup)) {
+                        continue;
+                    }
+
+                    String valueName = value.getClass().getName();
+                    if (valueName.contains(".toolbar.top.Toolbar")
+                            || value == actionListView.getParent()) {
+                        field.set(actionListView, newRoot);
+                        log("rebound extension transition root via field "
+                                + type.getName() + "." + field.getName());
+                        return;
+                    }
+                }
+            } catch (Throwable ignored) {}
+            type = type.getSuperclass();
+        }
+
+        log("extension transition-root field not found structurally");
+    }
+
+    private static Object findObjectReferencingView(
+            Object root, View target) {
+        if (root == null || target == null) {
+            return null;
+        }
+
+        Class<?> type = root.getClass();
+        while (type != null) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    if (field.getType().isPrimitive()) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    Object candidate = field.get(root);
+                    if (candidate == null
+                            || candidate instanceof View
+                            || candidate == root) {
+                        continue;
+                    }
+
+                    if (objectDirectlyReferences(candidate, target)) {
+                        return candidate;
+                    }
+                }
+            } catch (Throwable ignored) {}
+            type = type.getSuperclass();
+        }
+
+        return null;
+    }
+
+    private static boolean objectDirectlyReferences(
+            Object object, View target) {
+        Class<?> type = object.getClass();
+        while (type != null) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    if (field.getType().isPrimitive()) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    if (field.get(object) == target) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {}
+            type = type.getSuperclass();
+        }
+        return false;
     }
 
     private static Activity unwrapActivity(Context context) {
@@ -2036,44 +2114,62 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
+        LinearLayout extensionsToolbar =
+                findCoordinatorLinearContainer(coordinator);
+        if (extensionsToolbar == null) {
+            int containerId = activity.getResources().getIdentifier(
+                    "extensions_toolbar_container", "id", TARGET_PACKAGE);
+            View byId = containerId != 0
+                    ? activity.findViewById(containerId)
+                    : null;
+            if (byId instanceof LinearLayout) {
+                extensionsToolbar = (LinearLayout) byId;
+            }
+        }
+
+        if (extensionsToolbar == null) {
+            log("popup bridge: extensions toolbar container not found");
+            return;
+        }
+
+        View recyclerView = findNamedView(
+                extensionsToolbar,
+                activity.getResources(),
+                "extension_action_list");
+        if (recyclerView == null) {
+            log("popup bridge: extension_action_list not found");
+            return;
+        }
+
         Object actionListCoordinator =
-                XposedHelpers.getObjectField(coordinator, "V");
+                findObjectReferencingView(coordinator, recyclerView);
         if (actionListCoordinator == null) {
-            log("popup bridge: rr9.V is null");
+            log("popup bridge: action-list coordinator not found structurally");
             return;
         }
 
         Method getButtonMethod = null;
-        for (Method method : actionListCoordinator.getClass().getDeclaredMethods()) {
-            Class<?>[] params = method.getParameterTypes();
-            if (params.length == 1
-                    && params[0] == String.class
-                    && View.class.isAssignableFrom(method.getReturnType())) {
-                method.setAccessible(true);
-                getButtonMethod = method;
-                break;
+        try {
+            for (Method method : actionListCoordinator.getClass().getDeclaredMethods()) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length == 1
+                        && params[0] == String.class
+                        && View.class.isAssignableFrom(method.getReturnType())) {
+                    method.setAccessible(true);
+                    getButtonMethod = method;
+                    break;
+                }
             }
+        } catch (Throwable t) {
+            log("popup bridge: anchor method structural scan failed: "
+                    + stackSummary(t));
         }
 
         if (getButtonMethod == null) {
             log("popup bridge: String->View anchor method missing on "
                     + actionListCoordinator.getClass().getName());
-            dumpDeclaredMethodShapes(actionListCoordinator.getClass());
             return;
         }
-
-        Object recycler = null;
-        try {
-            recycler = XposedHelpers.getObjectField(
-                    actionListCoordinator, "T");
-        } catch (Throwable ignored) {}
-
-        if (!(recycler instanceof View)) {
-            log("popup bridge: action RecyclerView not found");
-            return;
-        }
-
-        View recyclerView = (View) recycler;
 
         boolean actionAlreadyVisible = false;
         try {
