@@ -23,22 +23,26 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Build-specific repair for Google Chrome Desktop Android 153.0.8010.49
- * (versionCode 801004974).
+ * Build-specific repair for Google Chrome Desktop Android 153.
  *
- * APK findings used by this hook:
+ * Verified mappings:
+ *   153.0.8010.49 / 801004974: ToolbarManager = hns,
+ *                                coordinator Supplier = ums,
+ *                                init Runnable = cms
+ *   153.0.8010.52 / 801005274: ToolbarManager = jns,
+ *                                coordinator Supplier = wms,
+ *                                init Runnable = ems
  *
  * ChromeTabbedActivity.a3(...)
- *   -> zd4.P2() : hns
- *   -> hns.J1   : rr9
+ *   -> zd4.P2() : ToolbarManager
+ *   -> ToolbarManager.J1 : rr9
  *   -> rr9.f0 = true
  *
  * rr9 is ExtensionsToolbarCoordinatorImpl.
- * hns is ToolbarManager.
- * hns.l(...) is ToolbarManager.initializeWithNative(...).
+ * ToolbarManager.l(...) is ToolbarManager.initializeWithNative(...).
  *
- * The normal hns.l creation block is skipped when either the extensions
- * ViewStub is absent or hns.D1.get() returns null.
+ * The normal creation block is skipped when either the extensions ViewStub
+ * is absent or the ChromeAndroidTask supplier returns null.
  */
 public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final String TAG = "DesktopChromeInit";
@@ -53,7 +57,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ClassLoader chromeClassLoader;
 
     /**
-     * hns.l() receives two objects which Chrome captures into the synthetic
+     * ToolbarManager.l() receives two objects which Chrome captures into the synthetic
      * ums Supplier used to build rr9. Keep them weakly keyed by ToolbarManager
      * so the repair can reproduce Chrome's own construction path later.
      */
@@ -117,12 +121,67 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     /**
      * Capture the two initializeWithNative arguments that are otherwise only
-     * available as local variables inside hns.l().
+     * available as local variables inside ToolbarManager.l().
      */
+    private static Class<?> resolveToolbarManagerClass(ClassLoader classLoader) {
+        // P2() is the stable ChromeActivity accessor for ToolbarManager in both
+        // 801004974 and 801005274. Resolve its return type instead of trusting
+        // the build-specific R8 class name (hns -> jns in 801005274).
+        Class<?> chromeTabbedActivity = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.ChromeTabbedActivity",
+                classLoader);
+        if (chromeTabbedActivity != null) {
+            Class<?> owner = chromeTabbedActivity;
+            while (owner != null) {
+                try {
+                    Method p2 = owner.getDeclaredMethod("P2");
+                    Class<?> candidate = p2.getReturnType();
+                    if (looksLikeToolbarManager(candidate)) {
+                        log("resolved ToolbarManager from P2(): "
+                                + candidate.getName());
+                        return candidate;
+                    }
+                } catch (NoSuchMethodException ignored) {
+                    // P2() is declared on a superclass in current builds.
+                } catch (Throwable t) {
+                    log("P2() ToolbarManager resolution failed on "
+                            + owner.getName() + ": " + stackSummary(t));
+                }
+                owner = owner.getSuperclass();
+            }
+        }
+
+        // Fallbacks for the two APKs that have been reverse engineered.
+        for (String name : new String[]{"jns", "hns"}) {
+            Class<?> candidate =
+                    XposedHelpers.findClassIfExists(name, classLoader);
+            if (looksLikeToolbarManager(candidate)) {
+                log("resolved ToolbarManager by build fallback: " + name);
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean looksLikeToolbarManager(Class<?> candidate) {
+        if (candidate == null) {
+            return false;
+        }
+        try {
+            Field coordinator = candidate.getDeclaredField("J1");
+            Field container = candidate.getDeclaredField("d0");
+            return "rr9".equals(coordinator.getType().getName())
+                    && View.class.isAssignableFrom(container.getType());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static void installToolbarInitCapture(ClassLoader classLoader) {
-        Class<?> toolbarManager = XposedHelpers.findClassIfExists("hns", classLoader);
+        Class<?> toolbarManager = resolveToolbarManagerClass(classLoader);
         if (toolbarManager == null) {
-            log("hns not found; target Chrome obfuscation does not match");
+            log("ToolbarManager not found; target Chrome obfuscation does not match");
             return;
         }
 
@@ -130,7 +189,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 // 801004974:
-                // hns.l(mfe, i2q, Runnable, OnClickListener, fbi, fbi,
+                // ToolbarManager.l(mfe, i2q, Runnable, OnClickListener, fbi, fbi,
                 //       ydt, ki4, dp4)
                 if (param.args == null || param.args.length != 9) {
                     return;
@@ -150,7 +209,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     Object coordinator = XposedHelpers.getObjectField(
                             toolbarManagerObject, "J1");
                     if (coordinator == null) {
-                        log("initializeWithNative finished with hns.J1 == null; scheduling proactive repair");
+                        log("initializeWithNative finished with ToolbarManager.J1 == null; scheduling proactive repair");
                     } else {
                         log("Extensions coordinator initialized normally");
                     }
@@ -158,14 +217,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     Object controlContainer = XposedHelpers.getObjectField(
                             toolbarManagerObject, "d0");
                     if (!(controlContainer instanceof View)) {
-                        log("proactive repair skipped: hns.d0 is not a View");
+                        log("proactive repair skipped: ToolbarManager.d0 is not a View");
                         return;
                     }
 
                     View controlView = (View) controlContainer;
                     Activity activity = unwrapActivity(controlView.getContext());
                     if (activity == null) {
-                        log("proactive repair skipped: could not resolve Activity from hns.d0 context");
+                        log("proactive repair skipped: could not resolve Activity from ToolbarManager.d0 context");
                         return;
                     }
 
@@ -182,7 +241,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         }
                     });
                 } catch (Throwable t) {
-                    log("could not inspect/proactively repair hns.J1 after init: " + t);
+                    log("could not inspect/proactively repair ToolbarManager.J1 after init: " + t);
                 }
             }
         });
@@ -234,7 +293,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         return;
                     }
 
-                    log("Extensions action hit with hns.J1 == null; repairing");
+                    log("Extensions action hit with ToolbarManager.J1 == null; repairing");
 
                     if (!repairCoordinator(activity, toolbarManager)) {
                         // Do not let the known rr9.f0 NPE terminate Chrome.
@@ -291,13 +350,13 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         InitCapture capture = INIT_CAPTURES.get(toolbarManager);
         if (capture == null) {
-            log("no hns.l() capture; force-stop Chrome after enabling module");
+            log("no ToolbarManager.l() capture; force-stop Chrome after enabling module");
             return false;
         }
 
         Object chromeAndroidTask = getChromeAndroidTask(toolbarManager);
         if (chromeAndroidTask == null) {
-            log("hns.D1.get() == null; retrying ChromeActivity.S2()");
+            log("ToolbarManager.D1.get() == null; retrying ChromeActivity.S2()");
             retryChromeAndroidTaskInitialization(activity);
             chromeAndroidTask = getChromeAndroidTask(toolbarManager);
         }
@@ -331,8 +390,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         Object verify = XposedHelpers.getObjectField(toolbarManager, "J1");
         boolean repaired = verify != null;
         log(repaired
-                ? "repair successful: hns.J1 initialized"
-                : "repair failed: hns.J1 remained null");
+                ? "repair successful: ToolbarManager.J1 initialized"
+                : "repair failed: ToolbarManager.J1 remained null");
 
         if (repaired) {
             ACTIVE_COORDINATORS.put(activity, coordinator);
@@ -342,7 +401,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * hns.D1 is the Supplier used by ToolbarManager.initializeWithNative().
+     * ToolbarManager.D1 is the Supplier used by ToolbarManager.initializeWithNative().
      */
     private static Object getChromeAndroidTask(Object toolbarManager) {
         try {
@@ -353,7 +412,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
             return XposedHelpers.callMethod(supplier, "get");
         } catch (Throwable t) {
-            log("reading hns.D1 failed: " + t);
+            log("reading ToolbarManager.D1 failed: " + t);
             return null;
         }
     }
@@ -388,7 +447,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * hns.l() searches hns.d0 (ToolbarControlContainer) for
+     * ToolbarManager.l() searches ToolbarManager.d0 (ToolbarControlContainer) for
      * extensions_toolbar_container_stub. Phone layouts can omit that stub,
      * which causes Chrome to skip coordinator construction.
      */
@@ -399,7 +458,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             Object containerObject = XposedHelpers.getObjectField(
                     toolbarManager, "d0");
             if (!(containerObject instanceof View)) {
-                log("hns.d0 is not a View");
+                log("ToolbarManager.d0 is not a View");
                 return null;
             }
 
@@ -471,14 +530,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Reproduce only the rr9 creation block from hns.l().
+     * Reproduce only the rr9 creation block from ToolbarManager.l().
      *
      * Original 801004974 flow:
-     *   profile = hns.t0.h().f()
-     *   key = new se4(rr9.class, profile, (wl) hns.X0)
+     *   profile = ToolbarManager.t0.h().f()
+     *   key = new se4(rr9.class, profile, (wl) ToolbarManager.X0)
      *   factory = new ums(...)
      *   rr9 = (rr9) bf4.e(key, factory)
-     *   hns.J1 = rr9
+     *   ToolbarManager.J1 = rr9
      */
     private static Object createCoordinatorThroughChrome(
             Object toolbarManager,
@@ -489,19 +548,39 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         ClassLoader cl = chromeClassLoader;
         Class<?> rr9Class = XposedHelpers.findClass("rr9", cl);
         Class<?> se4Class = XposedHelpers.findClass("se4", cl);
-        Class<?> umsClass = XposedHelpers.findClass("ums", cl);
-        Class<?> cmsClass = XposedHelpers.findClass("cms", cl);
+
+        // R8 renamed these synthetic classes between 801004974 and 801005274.
+        // Do not select by "class exists": 801005274 still contains unrelated
+        // classes named ums/cms. Select them from the resolved ToolbarManager.
+        final String toolbarManagerName = toolbarManager.getClass().getName();
+        final String supplierClassName;
+        final String initRunnableClassName;
+        if ("jns".equals(toolbarManagerName)) {
+            supplierClassName = "wms";
+            initRunnableClassName = "ems";
+        } else if ("hns".equals(toolbarManagerName)) {
+            supplierClassName = "ums";
+            initRunnableClassName = "cms";
+        } else {
+            throw new IllegalStateException(
+                    "Unsupported ToolbarManager mapping: " + toolbarManagerName);
+        }
+
+        Class<?> supplierClass =
+                XposedHelpers.findClass(supplierClassName, cl);
+        Class<?> initRunnableClass =
+                XposedHelpers.findClass(initRunnableClassName, cl);
 
         Object tabModelSelector = XposedHelpers.getObjectField(
                 toolbarManager, "t0");
         if (tabModelSelector == null) {
-            log("hns.t0 == null");
+            log("ToolbarManager.t0 == null");
             return null;
         }
 
         Object tabModel = XposedHelpers.callMethod(tabModelSelector, "h");
         if (tabModel == null) {
-            log("hns.t0.h() == null");
+            log("ToolbarManager.t0.h() == null");
             return null;
         }
 
@@ -514,7 +593,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         Object windowAndroid = XposedHelpers.getObjectField(
                 toolbarManager, "X0");
         if (windowAndroid == null) {
-            log("hns.X0 == null");
+            log("ToolbarManager.X0 == null");
             return null;
         }
 
@@ -525,17 +604,17 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 windowAndroid
         );
 
-        // hns.l() creates cms(byte 8), stores hns in cms.T, and captures the
+        // ToolbarManager.l() creates cms(byte 8), stores hns in cms.T, and captures the
         // Runnable into ums.Y.
         Object initRunnable = XposedHelpers.newInstance(
-                cmsClass, (byte) 8);
+                initRunnableClass, (byte) 8);
         XposedHelpers.setObjectField(
                 initRunnable, "T", toolbarManager);
 
         // ums has no declared constructor in the optimized DEX. Chrome itself
         // allocates it then directly invokes Object.<init>(); Unsafe gives us
         // the same zero-initialized instance without inventing a constructor.
-        Object supplier = allocateWithoutConstructor(umsClass);
+        Object supplier = allocateWithoutConstructor(supplierClass);
 
         XposedHelpers.setObjectField(supplier, "S", toolbarManager);
         XposedHelpers.setObjectField(supplier, "T", stub);
@@ -549,7 +628,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         XposedHelpers.setObjectField(supplier, "Y", initRunnable);
 
         // Extensions in this Desktop build assumes ToolbarTablet during
-        // construction. On a phone, hns.c0 is ToolbarPhone, and ums.get()
+        // construction. On a phone, ToolbarManager.c0 is ToolbarPhone, and ums.get()
         // performs a hard cast to ToolbarTablet even though it only keeps that
         // value as a ViewGroup parent for RecyclerView transitions.
         //
@@ -566,7 +645,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         if (realToolbar != null
                 && !toolbarTabletClass.isInstance(realToolbar)) {
             if (!(realToolbar instanceof ViewGroup)) {
-                log("hns.c0 is neither ToolbarTablet nor ViewGroup: "
+                log("ToolbarManager.c0 is neither ToolbarTablet nor ViewGroup: "
                         + realToolbar.getClass().getName());
                 return null;
             }
@@ -640,7 +719,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * hns.l() additionally calls hns.b0.T.Y(rr9) after successful creation.
+     * ToolbarManager.l() additionally calls ToolbarManager.b0.T.Y(rr9) after successful creation.
      * Keep that side effect because it wires the coordinator back into the
      * surrounding toolbar state.
      */
@@ -1345,7 +1424,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 801004974 release DEX mapping:
+     * 801004974/801005274 release DEX mapping:
      *   zo9 = ExtensionActionListMediator
      *   zo9.n() = undoPopout()
      *   zo9.g() = reconcileActionItems()
