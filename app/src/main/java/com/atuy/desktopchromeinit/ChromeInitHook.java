@@ -70,9 +70,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final ThreadLocal<Boolean> POP_OUT_RECONCILING =
             new ThreadLocal<>();
 
-    private static final ThreadLocal<ToolbarSwap> TOOLBAR_SWAPS =
-            new ThreadLocal<>();
-
     private static final Map<Activity, Object> ACTIVE_COORDINATORS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -103,16 +100,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         InitCapture(Object contextMenuFactory, Object extensionSupport) {
             this.contextMenuFactory = contextMenuFactory;
             this.extensionSupport = extensionSupport;
-        }
-    }
-
-    private static final class ToolbarSwap {
-        final Field field;
-        final Object original;
-
-        ToolbarSwap(Field field, Object original) {
-            this.field = field;
-            this.original = original;
         }
     }
 
@@ -247,11 +234,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      *
      * 1. Inject the extensions ViewStub before Chrome's own
      *    initializeWithNative() runs.
-     * 2. Temporarily present ToolbarTablet while Chrome constructs the Desktop
-     *    extensions coordinator.
+     * 2. Keep Chrome's real ToolbarPhone installed while
+     *    initializeWithNative() runs. A constructor-only ToolbarTablet is not
+     *    fully initialized and newer builds call methods on its missing
+     *    internal collaborators.
      * 3. Let Chrome execute its own factory path.
-     * 4. Restore ToolbarPhone and discover the resulting coordinator by object
-     *    structure.
+     * 4. Discover the resulting coordinator by object structure. If Chrome
+     *    skipped construction, the known-build fallback performs the
+     *    ToolbarTablet substitution only around the coordinator factory call.
      *
      * This removes the normal runtime dependency on synthetic R8 classes such
      * as ums/wms and cms/ems.
@@ -295,11 +285,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             retryChromeAndroidTaskInitialization(activity);
                         }
                     }
-
-                    ToolbarSwap swap = swapToolbarPhoneForTablet(manager);
-                    if (swap != null) {
-                        TOOLBAR_SWAPS.set(swap);
-                    }
                 } catch (Throwable t) {
                     log("generic pre-initialize preparation failed: "
                             + stackSummary(t));
@@ -309,17 +294,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 Object manager = param.thisObject;
-
-                ToolbarSwap swap = TOOLBAR_SWAPS.get();
-                TOOLBAR_SWAPS.remove();
-                if (swap != null) {
-                    try {
-                        swap.field.set(manager, swap.original);
-                        log("restored real toolbar after Chrome-owned initialization");
-                    } catch (Throwable t) {
-                        log("failed to restore real toolbar: " + stackSummary(t));
-                    }
-                }
 
                 try {
                     Activity activity = resolveToolbarManagerActivity(manager);
@@ -467,42 +441,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         return null;
-    }
-
-    private static ToolbarSwap swapToolbarPhoneForTablet(Object manager)
-            throws Throwable {
-        Field toolbarField = findToolbarViewField(manager);
-        if (toolbarField == null) {
-            log("toolbar field not found structurally; skipping tablet substitution");
-            return null;
-        }
-
-        Object realToolbar = toolbarField.get(manager);
-        if (!(realToolbar instanceof ViewGroup)) {
-            return null;
-        }
-
-        Class<?> tabletClass = XposedHelpers.findClassIfExists(
-                "org.chromium.chrome.browser.toolbar.top.ToolbarTablet",
-                chromeClassLoader);
-        if (tabletClass == null || tabletClass.isInstance(realToolbar)) {
-            return null;
-        }
-
-        java.lang.reflect.Constructor<?> constructor =
-                tabletClass.getDeclaredConstructor(
-                        android.content.Context.class,
-                        android.util.AttributeSet.class);
-        constructor.setAccessible(true);
-
-        Object temporaryTablet = constructor.newInstance(
-                ((View) realToolbar).getContext(),
-                null);
-        toolbarField.set(manager, temporaryTablet);
-
-        log("temporarily substituted ToolbarTablet using structural toolbar field "
-                + toolbarField.getName());
-        return new ToolbarSwap(toolbarField, realToolbar);
     }
 
     private static Object findExtensionsCoordinator(Object manager) {
