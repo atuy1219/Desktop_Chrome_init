@@ -232,16 +232,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     /**
      * Primary compatibility strategy:
      *
-     * 1. Inject the extensions ViewStub before Chrome's own
+     * 1. On unknown builds, inject the extensions ViewStub before Chrome's own
+     *    initializeWithNative() runs and prefer Chrome-owned construction.
+     * 2. On the reverse-engineered .49/.52 phone builds, deliberately leave
+     *    the extensions ViewStub absent during initializeWithNative(). Their
+     *    synthetic Supplier hard-casts ToolbarPhone to ToolbarTablet.
+     * 3. Keep Chrome's real ToolbarPhone installed while the rest of
      *    initializeWithNative() runs.
-     * 2. Keep Chrome's real ToolbarPhone installed while
-     *    initializeWithNative() runs. A constructor-only ToolbarTablet is not
-     *    fully initialized and newer builds call methods on its missing
-     *    internal collaborators.
-     * 3. Let Chrome execute its own factory path.
-     * 4. Discover the resulting coordinator by object structure. If Chrome
-     *    skipped construction, the known-build fallback performs the
-     *    ToolbarTablet substitution only around the coordinator factory call.
+     * 4. After initialization, known builds create the extensions coordinator
+     *    through the fallback, which substitutes ToolbarTablet only around the
+     *    coordinator factory call and immediately restores ToolbarPhone.
      *
      * This removes the normal runtime dependency on synthetic R8 classes such
      * as ums/wms and cms/ems.
@@ -276,7 +276,20 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 try {
                     Activity activity = resolveToolbarManagerActivity(manager);
                     if (activity != null) {
-                        ensureExtensionsStub(activity, manager);
+                        String managerName = manager.getClass().getName();
+                        boolean knownPhoneDesktopBuild =
+                                "hns".equals(managerName) || "jns".equals(managerName);
+
+                        if (knownPhoneDesktopBuild) {
+                            // Do NOT inject the stub yet. On 801004974/801005274
+                            // Chrome's own extensions Supplier hard-casts c0 to
+                            // ToolbarTablet. Leaving the phone-layout stub absent
+                            // makes Chrome skip only that incompatible factory
+                            // block; repairCoordinator() runs it safely later.
+                            log("deferring extensions stub/factory until post-init fallback");
+                        } else {
+                            ensureExtensionsStub(activity, manager);
+                        }
 
                         // Best-effort compatibility with the existing task-init
                         // race. Failure here is non-fatal; Chrome may already
