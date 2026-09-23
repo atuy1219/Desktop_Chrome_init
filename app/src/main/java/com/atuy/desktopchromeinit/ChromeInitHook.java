@@ -114,8 +114,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         chromeClassLoader = lpparam.classLoader;
         log("loading into " + lpparam.processName);
 
-        installToolbarInitCapture(lpparam.classLoader);
+        // Install the crash guard first. Even if a later structural
+        // compatibility probe fails on a future Desktop build, the Extensions
+        // menu handler must already be intercepted before Chrome can execute
+        // the known null-coordinator path.
         installExtensionsMenuRepair(lpparam.classLoader);
+        installToolbarInitCapture(lpparam.classLoader);
         installExtensionPopupWidthBridge(lpparam.classLoader);
         installExtensionPopupDismissCleanup(lpparam.classLoader);
     }
