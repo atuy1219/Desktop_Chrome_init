@@ -2,15 +2,18 @@
 
 LSPosed module for Google Chrome Desktop Android builds running on unsupported Android devices.
 
-This repository currently targets:
+Current verified target:
 
-- Chrome **153.0.8010.49**
-- versionCode **801004974**
+- Chrome **153.0.8010.53**
+- versionCode **801005374**
 - package **com.android.chrome**
+- modern libxposed API **102**
+
+The module declares a static scope containing only `com.android.chrome`, so it is not intended to load into other apps.
 
 ## What is being fixed
 
-On the target build, opening the Extensions menu can crash with:
+On Chrome Desktop Android running on a phone, opening the Extensions menu can crash with:
 
 ```text
 java.lang.NullPointerException:
@@ -18,43 +21,55 @@ Attempt to write to field 'boolean rr9.f0' on a null object reference
 at org.chromium.chrome.browser.ChromeTabbedActivity.a3(...)
 ```
 
-Direct inspection of the target APK shows that the crashing path is:
+Direct DEX inspection of 153.0.8010.53 / 801005374 confirms this path:
 
 ```text
-ChromeTabbedActivity.a3(...)
+ChromeTabbedActivity.a3(int, boolean, Bundle, u1h)
   -> zd4.P2()
-  -> hns.J1        // rr9 / ExtensionsToolbarCoordinatorImpl
-  -> rr9.f0 = true // crashes when J1 == null
+  -> jns.J1 : rr9
+  -> rr9.f0
 ```
 
-For this build:
+The `.53` build keeps the same relevant mapping as `.52`:
 
-- `hns` corresponds to `ToolbarManager`
-- `hns.l(...)` corresponds to `ToolbarManager.initializeWithNative(...)`
-- `hns.J1` stores the Extensions toolbar coordinator
-- `rr9` is the obfuscated `ExtensionsToolbarCoordinatorImpl`
+- `jns` = ToolbarManager
+- `jns.J1` = Extensions toolbar coordinator
+- `wms` = coordinator Supplier
+- `ems` = initialization Runnable
 
-The normal creation block in `hns.l(...)` is skipped when either:
+The regression in `.53` was therefore not an R8 rename of the coordinator path. The previous module still installed the menu repair with `hookAllMethods(ChromeTabbedActivity, "a3")`. Enumerating all methods on this Desktop build can force ART to resolve framework-only method signatures which do not exist on the phone OS, preventing the `a3` hook from being installed.
 
-1. `extensions_toolbar_container_stub` is missing from the current toolbar layout, or
-2. the Chrome Android task supplier (`hns.D1`) returns null.
+The module now resolves and hooks only the exact Extensions handler signature instead of enumerating every `ChromeTabbedActivity` method.
 
-The module repairs those prerequisites and replays only the coordinator-creation portion instead of re-running the entire ToolbarManager initialization.
+## Compatibility strategy
 
-## Repair strategy
+The compatibility work is split into two layers:
 
-When the Extensions menu is selected, the module:
+1. Structural resolution is used where practical: ToolbarManager discovery, initialize-with-native detection, toolbar/container discovery, extension coordinator discovery, and resource-name lookup.
+2. The known Chrome 153 phone fallback still contains a small set of verified obfuscated mappings needed to reconstruct Chrome's own Extensions coordinator when the normal Desktop factory cannot run against `ToolbarPhone`.
 
-1. obtains `ToolbarManager` via `zd4.P2()`;
-2. checks `hns.J1`;
-3. if needed, retries Chrome's own `ChromeActivity.initializeChromeAndroidTask` path;
-4. finds or injects `extensions_toolbar_container_stub`;
-5. reconstructs Chrome's synthetic Extensions coordinator supplier using the values captured from `hns.l(...)`;
-6. asks Chrome's existing Android-task cache to create/retrieve the coordinator;
-7. stores the result back into `hns.J1`;
-8. lets the original `ChromeTabbedActivity.a3(...)` continue.
+Verified mappings:
 
-If the repair cannot be completed, the module suppresses only this known Extensions-menu NPE instead of allowing Chrome to terminate. The failure reason is written to the LSPosed log.
+- 153.0.8010.49 / 801004974: `hns`, `ums`, `cms`
+- 153.0.8010.52 / 801005274: `jns`, `wms`, `ems`
+- 153.0.8010.53 / 801005374: `jns`, `wms`, `ems`
+
+This means the previous work was partially generic rather than fully version-independent. Future builds that keep the structural path working should not need a mapping update; changes to the coordinator fallback may still require DEX verification.
+
+## Modern Xposed API
+
+Version 0.4.0 no longer depends on the legacy `de.robv.android.xposed` API.
+
+It uses:
+
+- `io.github.libxposed:api:102.0.0`
+- `META-INF/xposed/java_init.list`
+- `META-INF/xposed/scope.list`
+- `META-INF/xposed/module.prop`
+- `staticScope=true`
+- `exceptionMode=protective`
+
+The large existing Chrome repair implementation is preserved behind a small module-local compatibility facade, but the runtime hook backend is the modern libxposed interceptor API. No legacy Xposed API dependency or legacy `assets/xposed_init` entry remains.
 
 ## Build
 
@@ -62,17 +77,23 @@ If the repair cannot be completed, the module suppresses only this known Extensi
 gradle :app:assembleRelease
 ```
 
-A GitHub Actions workflow also builds the APK and uploads it as an artifact.
+GitHub Actions builds and signature-verifies the release APK and uploads it as the `DesktopChromeInit-release` artifact.
 
 ## Install
 
-1. Build/install the module APK.
-2. Enable it in LSPosed.
-3. Scope it to **Chrome (`com.android.chrome`)**.
-4. Force-stop Chrome.
-5. Launch Chrome and open the Extensions menu.
-6. If it still does not open, inspect the LSPosed log for entries beginning with `DesktopChromeInit`.
+1. Install the module APK.
+2. Enable the module in LSPosed.
+3. Force-stop Chrome.
+4. Launch Chrome and test the Extensions menu, pinned extension buttons, unpinned popup actions, and custom tabs.
 
-## Compatibility
+The module's declared scope is fixed to **Chrome (`com.android.chrome`)**.
 
-The repair code intentionally contains obfuscated symbol names from versionCode `801004974`. Those names may change in later Chrome builds. The menu detection itself also checks the resource name `extensions_menu_menu_id`, but the internal repair is considered build-specific.
+## Diagnostics
+
+LSPosed log messages are prefixed with:
+
+```text
+DesktopChromeInit:
+```
+
+For the Extensions-menu crash, the important startup messages are the ToolbarManager resolution, initialize hook installation, coordinator creation, and exact `a3(int,boolean,Bundle,u1h)` hook installation.
