@@ -7,6 +7,8 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
+import io.github.libxposed.api.XposedInterface;
+
 /**
  * Reflection helpers used by DesktopChromeInit.
  *
