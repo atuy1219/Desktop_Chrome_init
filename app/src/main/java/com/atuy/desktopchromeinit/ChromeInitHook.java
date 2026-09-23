@@ -16,11 +16,11 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import com.atuy.desktopchromeinit.compat.IXposedHookLoadPackage;
+import com.atuy.desktopchromeinit.compat.XC_MethodHook;
+import com.atuy.desktopchromeinit.compat.XposedBridge;
+import com.atuy.desktopchromeinit.compat.XposedHelpers;
+import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
 
 /**
  * Build-specific repair for Google Chrome Desktop Android 153.
@@ -32,6 +32,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *   153.0.8010.52 / 801005274: ToolbarManager = jns,
  *                                coordinator Supplier = wms,
  *                                init Runnable = ems
+ *   153.0.8010.53 / 801005374: same jns/wms/ems mapping (verified from DEX)
  *
  * ChromeTabbedActivity.a3(...)
  *   -> zd4.P2() : ToolbarManager
@@ -169,7 +170,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     /**
      * Find ToolbarManager.initializeWithNative() by parameter shape.
      *
-     * 801004974/801005274 both use nine arguments with Runnable at index 2 and
+     * 801004974/801005274/801005374 use nine arguments with Runnable at index 2 and
      * View.OnClickListener at index 3. A relaxed pass is retained so an R8
      * rename or a small signature extension does not immediately break the
      * module.
@@ -505,7 +506,46 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        XposedBridge.hookAllMethods(chromeTabbedActivity, "a3", new XC_MethodHook() {
+        /*
+         * Do not use hookAllMethods() here. Chrome Desktop may declare methods
+         * whose parameter types only exist on ChromeOS/desktop Android
+         * (for example HandoffActivityData). Enumerating every declared method
+         * forces ART to resolve those unavailable framework types and can abort
+         * hook installation before a3() is reached.
+         *
+         * 153.0.8010.49/.52/.53 use the exact signature below. Resolve only
+         * that method, so unrelated desktop-only method signatures are never
+         * touched.
+         */
+        Class<?> menuContext = XposedHelpers.findClassIfExists(
+                "u1h", classLoader);
+        if (menuContext == null) {
+            log("Extensions menu context class u1h not found; exact a3 hook unavailable");
+            return;
+        }
+
+        Method extensionsMenuMethod = null;
+        Class<?> menuOwner = chromeTabbedActivity;
+        while (menuOwner != null && extensionsMenuMethod == null) {
+            try {
+                extensionsMenuMethod = menuOwner.getDeclaredMethod(
+                        "a3",
+                        int.class,
+                        boolean.class,
+                        android.os.Bundle.class,
+                        menuContext);
+            } catch (NoSuchMethodException ignored) {
+                menuOwner = menuOwner.getSuperclass();
+            }
+        }
+
+        if (extensionsMenuMethod == null) {
+            log("exact Extensions menu handler a3(int,boolean,Bundle,u1h) not found");
+            return;
+        }
+        extensionsMenuMethod.setAccessible(true);
+
+        XposedBridge.hookMethod(extensionsMenuMethod, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args == null
