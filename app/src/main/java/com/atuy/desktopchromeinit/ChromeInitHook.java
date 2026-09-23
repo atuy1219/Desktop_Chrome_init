@@ -56,6 +56,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final int FALLBACK_EXTENSIONS_LAYOUT_ID = 0x7f0e0190;
 
     private static volatile ClassLoader chromeClassLoader;
+    private static volatile Object extensionsMenuHookHandle;
+    private static volatile boolean auxiliaryHooksInstalled;
 
     /**
      * ToolbarManager.l() receives two objects which Chrome captures into the synthetic
@@ -105,23 +107,39 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+    public synchronized void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!TARGET_PACKAGE.equals(lpparam.packageName)
                 || !TARGET_PACKAGE.equals(lpparam.processName)) {
             return;
         }
 
         chromeClassLoader = lpparam.classLoader;
-        log("loading into " + lpparam.processName);
+        log("loading into " + lpparam.processName
+                + " loader=" + lpparam.classLoader);
 
-        // Install the crash guard first. Even if a later structural
-        // compatibility probe fails on a future Desktop build, the Extensions
-        // menu handler must already be intercepted before Chrome can execute
-        // the known null-coordinator path.
-        installExtensionsMenuRepair(lpparam.classLoader);
+        // The crash guard is mandatory. Do not consider this module installed
+        // until the HookHandle has actually been returned by the framework.
+        if (!installExtensionsMenuRepair(lpparam.classLoader)) {
+            log("Extensions menu guard is not installed yet");
+            return;
+        }
+
+        if (auxiliaryHooksInstalled) {
+            return;
+        }
+
+        // These hooks improve full Extensions functionality but are secondary
+        // to the a3 crash guard and can be installed once the target classes
+        // are available.
         installToolbarInitCapture(lpparam.classLoader);
         installExtensionPopupWidthBridge(lpparam.classLoader);
         installExtensionPopupDismissCleanup(lpparam.classLoader);
+        auxiliaryHooksInstalled = true;
+        log("auxiliary Chrome hooks installed");
+    }
+
+    public static boolean isExtensionsMenuGuardInstalled() {
+        return extensionsMenuHookHandle != null;
     }
 
     /**
@@ -500,14 +518,18 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         return null;
     }
 
-    private static void installExtensionsMenuRepair(ClassLoader classLoader) {
+    private static synchronized boolean installExtensionsMenuRepair(ClassLoader classLoader) {
+        if (extensionsMenuHookHandle != null) {
+            return true;
+        }
+
         Class<?> chromeTabbedActivity = XposedHelpers.findClassIfExists(
                 "org.chromium.chrome.browser.ChromeTabbedActivity",
                 classLoader
         );
         if (chromeTabbedActivity == null) {
-            log("ChromeTabbedActivity not found");
-            return;
+            log("ChromeTabbedActivity not found with loader=" + classLoader);
+            return false;
         }
 
         /*
@@ -524,8 +546,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         Class<?> menuContext = XposedHelpers.findClassIfExists(
                 "u1h", classLoader);
         if (menuContext == null) {
-            log("Extensions menu context class u1h not found; exact a3 hook unavailable");
-            return;
+            log("Extensions menu context class u1h not found with loader="
+                    + classLoader);
+            return false;
         }
 
         Method extensionsMenuMethod = null;
@@ -545,11 +568,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         if (extensionsMenuMethod == null) {
             log("exact Extensions menu handler a3(int,boolean,Bundle,u1h) not found");
-            return;
+            return false;
         }
         extensionsMenuMethod.setAccessible(true);
 
-        XposedBridge.hookMethod(extensionsMenuMethod, new XC_MethodHook() {
+        Object hookHandle = XposedBridge.hookMethod(extensionsMenuMethod, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (param.args == null
@@ -566,6 +589,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 }
 
                 EXTENSIONS_ACTION.set(Boolean.TRUE);
+                log("Extensions a3 guard HIT id=0x"
+                        + Integer.toHexString(id));
 
                 try {
                     // Do not use XposedHelpers.callMethod() on ChromeActivity.
@@ -621,6 +646,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 }
             }
         });
+
+        extensionsMenuHookHandle = hookHandle;
+        log("installed exact Extensions menu guard on "
+                + extensionsMenuMethod);
+        return true;
     }
 
     private static boolean isExtensionsMenuAction(Activity activity, int id) {
@@ -2464,6 +2494,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     private static void log(String message) {
+        // Framework log for module diagnostics plus logcat for cases where the
+        // framework's module-log view is filtered independently.
+        try {
+            android.util.Log.i(TAG, message);
+        } catch (Throwable ignored) {}
         XposedBridge.log(TAG + ": " + message);
     }
 }
