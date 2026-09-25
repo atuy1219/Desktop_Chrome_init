@@ -18,7 +18,6 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -121,7 +120,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         boolean initializedFromCurrentApplication = false;
         try {
-            Application current = AndroidAppHelper.currentApplication();
+            Application current = getCurrentApplication();
             if (current != null
                     && TARGET_PACKAGE.equals(current.getPackageName())) {
                 ClassLoader loader = current.getClassLoader();
@@ -150,6 +149,23 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 log("handleLoadPackage appInfo is null; deferring DEX "
                         + "resolution to Application.attach");
             }
+        }
+    }
+
+    private static Application getCurrentApplication() {
+        try {
+            Class<?> activityThread =
+                    Class.forName("android.app.ActivityThread");
+            Method currentApplication =
+                    activityThread.getDeclaredMethod(
+                            "currentApplication");
+            currentApplication.setAccessible(true);
+            Object value = currentApplication.invoke(null);
+            return value instanceof Application
+                    ? (Application) value
+                    : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
