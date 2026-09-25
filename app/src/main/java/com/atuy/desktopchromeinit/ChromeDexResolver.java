@@ -102,26 +102,86 @@ final class ChromeDexResolver {
         }
     }
 
+    static final class MenuHandler {
+        final String methodName;
+        final String fourthParameterDescriptor;
+
+        MenuHandler(
+                String methodName,
+                String fourthParameterDescriptor) {
+            this.methodName = methodName;
+            this.fourthParameterDescriptor = fourthParameterDescriptor;
+        }
+
+        String describe() {
+            return methodName + "(int,boolean,Bundle,"
+                    + fourthParameterDescriptor + ")";
+        }
+    }
+
+    /**
+     * Resolve the broad ChromeTabbedActivity command-handler shape without
+     * depending on ToolbarManager/coordinator/Supplier resolution.
+     *
+     * This is intentionally independent from resolve(): even if Chromium
+     * semantically changes the Extensions initialization path, callers can
+     * still install a fail-safe around candidate menu handlers and prevent a
+     * null Extensions coordinator from terminating Chrome.
+     */
+    static List<MenuHandler> resolveMenuHandlers(
+            ApplicationInfo appInfo) throws IOException {
+        List<DexFile> dexFiles = loadApplicationDexFiles(appInfo);
+
+        DexFile activityDex = null;
+        ClassDef activityClass = null;
+        for (DexFile dex : dexFiles) {
+            ClassDef candidate = dex.classes.get(CHROME_TABBED_ACTIVITY);
+            if (candidate != null) {
+                activityDex = dex;
+                activityClass = candidate;
+                break;
+            }
+        }
+
+        if (activityDex == null || activityClass == null) {
+            throw new IOException("ChromeTabbedActivity class not found");
+        }
+
+        ArrayList<MenuHandler> handlers = new ArrayList<>();
+        HashSet<String> seen = new HashSet<>();
+        for (MethodDef def : activityDex.getDefinedMethods(activityClass)) {
+            if ((def.accessFlags & ACC_STATIC) != 0) {
+                continue;
+            }
+
+            MethodId method = activityDex.methods[def.methodIndex];
+            Proto proto = activityDex.protos[method.protoIndex];
+            String[] p = proto.parameterDescriptors;
+            if (!BOOLEAN.equals(proto.returnDescriptor)
+                    || p.length != 4
+                    || !INT.equals(p[0])
+                    || !BOOLEAN.equals(p[1])
+                    || !BUNDLE.equals(p[2])
+                    || !isObjectDescriptor(p[3])) {
+                continue;
+            }
+
+            String key = method.name + "\n" + p[3];
+            if (seen.add(key)) {
+                handlers.add(new MenuHandler(method.name, p[3]));
+            }
+        }
+
+        if (handlers.isEmpty()) {
+            throw new IOException(
+                    "No boolean(int,boolean,Bundle,*) "
+                            + "ChromeTabbedActivity handlers found");
+        }
+        return handlers;
+    }
+
     static Symbols resolve(ApplicationInfo appInfo) throws IOException {
-        if (appInfo == null) {
-            throw new IOException("ApplicationInfo is null");
-        }
-
-        ArrayList<String> apkPaths = new ArrayList<>();
-        if (appInfo.sourceDir != null) {
-            apkPaths.add(appInfo.sourceDir);
-        }
-        if (appInfo.splitSourceDirs != null) {
-            apkPaths.addAll(Arrays.asList(appInfo.splitSourceDirs));
-        }
-
-        ArrayList<DexFile> dexFiles = new ArrayList<>();
-        for (String path : apkPaths) {
-            loadDexFiles(path, dexFiles);
-        }
-        if (dexFiles.isEmpty()) {
-            throw new IOException("No classes*.dex found in Chrome APKs");
-        }
+        List<DexFile> dexFiles = loadApplicationDexFiles(appInfo);
 
         HashMap<String, DexFile> classOwners = new HashMap<>();
         for (DexFile dex : dexFiles) {
@@ -609,6 +669,51 @@ final class ChromeDexResolver {
         }
         return descriptor.substring(1, descriptor.length() - 1)
                 .replace('/', '.');
+    }
+
+    private static List<DexFile> loadApplicationDexFiles(
+            ApplicationInfo appInfo) throws IOException {
+        if (appInfo == null) {
+            throw new IOException("ApplicationInfo is null");
+        }
+
+        ArrayList<String> apkPaths = new ArrayList<>();
+        if (appInfo.sourceDir != null) {
+            apkPaths.add(appInfo.sourceDir);
+        }
+        if (appInfo.splitSourceDirs != null) {
+            for (String path : appInfo.splitSourceDirs) {
+                if (path != null) {
+                    apkPaths.add(path);
+                }
+            }
+        }
+
+        if (apkPaths.isEmpty()) {
+            throw new IOException("Chrome APK path list is empty");
+        }
+
+        ArrayList<DexFile> dexFiles = new ArrayList<>();
+        IOException firstFailure = null;
+        for (String path : apkPaths) {
+            try {
+                loadDexFiles(path, dexFiles);
+            } catch (IOException e) {
+                // Language / feature splits do not all need to be readable for
+                // symbol resolution. Keep scanning other paths; base.apk is
+                // sufficient on the currently verified Chrome builds.
+                if (firstFailure == null) {
+                    firstFailure = e;
+                }
+            }
+        }
+
+        if (dexFiles.isEmpty()) {
+            throw new IOException(
+                    "No readable classes*.dex found in Chrome APKs",
+                    firstFailure);
+        }
+        return dexFiles;
     }
 
     private static void loadDexFiles(
