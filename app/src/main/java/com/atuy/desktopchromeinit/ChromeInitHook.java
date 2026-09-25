@@ -1,9 +1,11 @@
 package com.atuy.desktopchromeinit;
 
 import android.app.Activity;
+import android.app.Application;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.res.Resources;
+import android.content.pm.ApplicationInfo;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewStub;
@@ -37,6 +39,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ClassLoader chromeClassLoader;
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
+
+    private static final String BUILD_MARKER = "0.4.1-generic-failsafe";
+    private static final Object INSTALL_LOCK = new Object();
+    private static volatile boolean attachBootstrapInstalled;
+    private static volatile boolean emergencyMenuGuardInstalled;
+    private static volatile boolean featureHooksInstalled;
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
@@ -101,25 +109,256 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         chromeClassLoader = lpparam.classLoader;
-        log("loading into " + lpparam.processName);
+        log("loading " + BUILD_MARKER + " into " + lpparam.processName);
 
-        try {
-            resolvedSymbols = ChromeDexResolver.resolve(lpparam.appInfo);
-            log("DEX symbols resolved: " + resolvedSymbols.describe());
-        } catch (Throwable t) {
-            log("DEX symbol resolution failed; refusing unsafe obfuscated-name "
-                    + "fallbacks: " + stackSummary(t));
+        // Vector/LSPosed variants can expose an incomplete or null
+        // LoadPackageParam.appInfo during the early legacy callback. Never make
+        // the entire module depend on that timing. Application.attach() gives
+        // us the final Context, ApplicationInfo and ClassLoader before Chrome's
+        // toolbar/activity initialization.
+        installApplicationAttachBootstrap();
+
+        if (lpparam.appInfo != null) {
+            initializeChromeHooks(
+                    lpparam.classLoader,
+                    lpparam.appInfo,
+                    "handleLoadPackage");
+        } else {
+            log("handleLoadPackage appInfo is null; deferring DEX resolution "
+                    + "to Application.attach");
+        }
+    }
+
+    private static void installApplicationAttachBootstrap() {
+        synchronized (INSTALL_LOCK) {
+            if (attachBootstrapInstalled) {
+                return;
+            }
+
+            try {
+                Method attach = Application.class.getDeclaredMethod(
+                        "attach", Context.class);
+                attach.setAccessible(true);
+                XposedBridge.hookMethod(attach, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(
+                            MethodHookParam param) {
+                        try {
+                            if (param.args == null
+                                    || param.args.length == 0
+                                    || !(param.args[0] instanceof Context)) {
+                                return;
+                            }
+
+                            Context context = (Context) param.args[0];
+                            if (!TARGET_PACKAGE.equals(
+                                    context.getPackageName())) {
+                                return;
+                            }
+
+                            ClassLoader loader = context.getClassLoader();
+                            if (loader == null) {
+                                loader = chromeClassLoader;
+                            }
+                            if (loader == null) {
+                                log("Application.attach: Chrome ClassLoader "
+                                        + "is null");
+                                return;
+                            }
+
+                            chromeClassLoader = loader;
+                            initializeChromeHooks(
+                                    loader,
+                                    context.getApplicationInfo(),
+                                    "Application.attach");
+                        } catch (Throwable t) {
+                            log("Application.attach bootstrap failed: "
+                                    + stackSummary(t));
+                        }
+                    }
+                });
+                attachBootstrapInstalled = true;
+                log("installed Application.attach bootstrap");
+            } catch (Throwable t) {
+                log("could not install Application.attach bootstrap: "
+                        + stackSummary(t));
+            }
+        }
+    }
+
+    private static void initializeChromeHooks(
+            ClassLoader classLoader,
+            ApplicationInfo appInfo,
+            String origin) {
+        if (classLoader == null || appInfo == null) {
+            log(origin + ": classLoader/appInfo unavailable");
             return;
         }
 
-        installExtensionSupplierToolbarBridge(
-                lpparam.classLoader, resolvedSymbols);
-        installToolbarInitializationHook(
-                lpparam.classLoader, resolvedSymbols);
-        installExtensionsMenuRepair(
-                lpparam.classLoader, resolvedSymbols);
-        installExtensionPopupWidthBridge(lpparam.classLoader);
-        installExtensionPopupDismissCleanup(lpparam.classLoader);
+        // Safety is deliberately independent from full feature resolution.
+        // A semantic Chromium change may break ToolbarManager/Supplier
+        // discovery, but it must not allow the Extensions action to crash
+        // Chrome with a null coordinator.
+        installEmergencyExtensionsMenuGuard(classLoader, appInfo);
+
+        synchronized (INSTALL_LOCK) {
+            if (featureHooksInstalled) {
+                return;
+            }
+
+            ChromeDexResolver.Symbols symbols;
+            try {
+                symbols = ChromeDexResolver.resolve(appInfo);
+                resolvedSymbols = symbols;
+                log(origin + ": DEX symbols resolved: "
+                        + symbols.describe());
+            } catch (Throwable t) {
+                log(origin + ": full DEX symbol resolution failed; "
+                        + "emergency menu guard remains active: "
+                        + stackSummary(t));
+                return;
+            }
+
+            installExtensionSupplierToolbarBridge(
+                    classLoader, symbols);
+            installToolbarInitializationHook(
+                    classLoader, symbols);
+            installExtensionPopupWidthBridge(classLoader);
+            installExtensionPopupDismissCleanup(classLoader);
+
+            featureHooksInstalled = true;
+            log(origin + ": full Chrome hooks installed");
+        }
+    }
+
+    private static void installEmergencyExtensionsMenuGuard(
+            ClassLoader classLoader,
+            ApplicationInfo appInfo) {
+        synchronized (INSTALL_LOCK) {
+            if (emergencyMenuGuardInstalled) {
+                return;
+            }
+
+            try {
+                java.util.List<ChromeDexResolver.MenuHandler> handlers =
+                        ChromeDexResolver.resolveMenuHandlers(appInfo);
+                Class<?> chromeTabbedActivity =
+                        XposedHelpers.findClassIfExists(
+                                "org.chromium.chrome.browser.ChromeTabbedActivity",
+                                classLoader);
+                if (chromeTabbedActivity == null) {
+                    log("emergency guard: ChromeTabbedActivity not found");
+                    return;
+                }
+
+                int installed = 0;
+                for (ChromeDexResolver.MenuHandler candidate : handlers) {
+                    try {
+                        Class<?> fourth = classForDescriptor(
+                                candidate.fourthParameterDescriptor,
+                                classLoader);
+                        Method method = chromeTabbedActivity.getDeclaredMethod(
+                                candidate.methodName,
+                                int.class,
+                                boolean.class,
+                                android.os.Bundle.class,
+                                fourth);
+                        method.setAccessible(true);
+
+                        XposedBridge.hookMethod(
+                                method,
+                                new XC_MethodHook() {
+                                    @Override
+                                    protected void beforeHookedMethod(
+                                            MethodHookParam param) {
+                                        if (param.args == null
+                                                || param.args.length != 4
+                                                || !(param.args[0]
+                                                        instanceof Integer)
+                                                || !(param.thisObject
+                                                        instanceof Activity)) {
+                                            return;
+                                        }
+
+                                        Activity activity =
+                                                (Activity) param.thisObject;
+                                        int id = (Integer) param.args[0];
+                                        if (!isExtensionsMenuAction(
+                                                activity, id)) {
+                                            return;
+                                        }
+
+                                        EXTENSIONS_ACTION.set(Boolean.TRUE);
+
+                                        // If the full resolver is active and
+                                        // we already know the ToolbarManager,
+                                        // fail before Chrome dereferences a
+                                        // missing coordinator. If runtime
+                                        // discovery is not ready, let the
+                                        // original run and catch only its NPE
+                                        // in afterHookedMethod().
+                                        Object manager =
+                                                ACTIVE_TOOLBAR_MANAGERS.get(
+                                                        activity);
+                                        if (manager != null
+                                                && resolvedSymbols != null
+                                                && findExtensionsCoordinator(
+                                                        manager) == null) {
+                                            log("emergency guard: Extensions "
+                                                    + "coordinator is null; "
+                                                    + "suppressing action");
+                                            param.setResult(true);
+                                        }
+                                    }
+
+                                    @Override
+                                    protected void afterHookedMethod(
+                                            MethodHookParam param) {
+                                        boolean extensionAction =
+                                                Boolean.TRUE.equals(
+                                                        EXTENSIONS_ACTION.get());
+                                        EXTENSIONS_ACTION.remove();
+                                        if (!extensionAction) {
+                                            return;
+                                        }
+
+                                        Throwable throwable =
+                                                param.getThrowable();
+                                        if (throwable
+                                                instanceof NullPointerException) {
+                                            log("emergency guard suppressed "
+                                                    + "Extensions-menu NPE in "
+                                                    + candidate.methodName
+                                                    + ": "
+                                                    + stackSummary(
+                                                            throwable));
+                                            param.setResult(true);
+                                        }
+                                    }
+                                });
+                        installed++;
+                        log("emergency guard hooked "
+                                + candidate.describe());
+                    } catch (Throwable t) {
+                        log("emergency guard candidate failed "
+                                + candidate.describe() + ": "
+                                + stackSummary(t));
+                    }
+                }
+
+                if (installed > 0) {
+                    emergencyMenuGuardInstalled = true;
+                    log("emergency Extensions menu guard active on "
+                            + installed + " candidate(s)");
+                } else {
+                    log("emergency Extensions menu guard installed "
+                            + "zero candidates");
+                }
+            } catch (Throwable t) {
+                log("emergency Extensions menu guard resolution failed: "
+                        + stackSummary(t));
+            }
+        }
     }
 
     private static Class<?> classForDescriptor(
