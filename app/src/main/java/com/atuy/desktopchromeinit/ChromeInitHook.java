@@ -1406,10 +1406,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     if (coordinator == null) {
                         log("Extensions action: coordinator unavailable; "
                                 + "retrying Chrome Supplier path");
-                        if (repairCoordinatorFromChromeSupplier(
-                                activity, manager)) {
-                            coordinator =
-                                    findExtensionsCoordinator(manager);
+                        try {
+                            if (repairCoordinatorFromChromeSupplier(
+                                    activity, manager)) {
+                                coordinator =
+                                        findExtensionsCoordinator(manager);
+                            }
+                        } catch (Throwable t) {
+                            log("Extensions action deferred repair failed: "
+                                    + stackSummary(t));
                         }
                     }
                     if (coordinator == null) {
