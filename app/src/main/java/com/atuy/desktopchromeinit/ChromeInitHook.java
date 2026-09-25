@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.6-task-init";
+    private static final String BUILD_MARKER = "0.4.7-viewstub-source-exact";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -1707,6 +1707,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         try {
             View container = findToolbarControlContainer(toolbarManager);
             if (container == null) {
+                lastRepairFailure = "ToolbarControlContainer unavailable";
                 log("ToolbarControlContainer not found structurally");
                 return null;
             }
@@ -1718,38 +1719,54 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     TARGET_PACKAGE
             );
             if (stubId == 0) {
+                lastRepairFailure =
+                        "extensions_toolbar_container_stub id unavailable";
                 log("extensions_toolbar_container_stub resource not found");
                 return null;
             }
 
             View existing = container.findViewById(stubId);
             if (existing instanceof ViewStub) {
+                lastRepairFailure = "none";
                 return (ViewStub) existing;
             }
 
             if (existing != null) {
+                lastRepairFailure =
+                        "stub id occupied by "
+                                + existing.getClass().getSimpleName();
                 log("extensions stub ID exists but is "
                         + existing.getClass().getName());
                 return null;
             }
 
             if (!(container instanceof ViewGroup)) {
+                lastRepairFailure =
+                        "ToolbarControlContainer is not ViewGroup";
                 log("ToolbarControlContainer is not a ViewGroup");
                 return null;
             }
 
-            int layoutId = resources.getIdentifier(
-                    "extensions_toolbar_container",
-                    "layout",
-                    TARGET_PACKAGE
-            );
-            if (layoutId == 0) {
-                log("extensions_toolbar_container layout resource not found");
-                return null;
-            }
-
+            /*
+             * Chromium 154 toolbar_tablet.xml deliberately gives this ViewStub
+             * only an id + inflatedId. It does NOT specify android:layout.
+             *
+             * ExtensionsToolbarCoordinatorImpl.initializeWithNative() owns the
+             * resource assignment:
+             *   extensionsToolbarStub.setLayoutResource(
+             *       R.layout.extensions_toolbar_container);
+             *   mContainer = (LinearLayout) extensionsToolbarStub.inflate();
+             *
+             * Requiring Resources.getIdentifier(..., "layout", ...) here was
+             * therefore both unnecessary and wrong. In Google Chrome builds
+             * the conditionally compiled extension UI resource need not be
+             * discoverable by name through Resources.getIdentifier(), even
+             * though the compiled coordinator can reference its integer R
+             * constant directly.
+             */
             ViewStub injected = new ViewStub(container.getContext());
             injected.setId(stubId);
+
             int inflatedId = resources.getIdentifier(
                     "extensions_toolbar_container",
                     "id",
@@ -1757,24 +1774,26 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             if (inflatedId != 0) {
                 injected.setInflatedId(inflatedId);
             }
-            injected.setLayoutResource(layoutId);
 
             ViewGroup group = (ViewGroup) container;
             try {
-                group.addView(injected);
-            } catch (Throwable first) {
                 group.addView(
                         injected,
                         new ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.WRAP_CONTENT
-                        )
-                );
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT));
+            } catch (Throwable first) {
+                // Let the parent choose its default LayoutParams when it can.
+                group.addView(injected);
             }
 
-            log("injected extensions_toolbar_container_stub");
+            lastRepairFailure = "none";
+            log("injected source-exact extensions_toolbar_container_stub "
+                    + "without pre-setting layout resource");
             return injected;
         } catch (Throwable t) {
+            lastRepairFailure =
+                    "ViewStub injection failed: " + stackSummary(t);
             log("stub repair failed: " + stackSummary(t));
             return null;
         }
