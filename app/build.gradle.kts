@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.4.1"
+        versionCode = 21
+        versionName = "0.4.2"
     }
 
     signingConfigs {
@@ -37,5 +37,5 @@ android {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:102.0.0")
 }
