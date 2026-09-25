@@ -23,52 +23,29 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Build-specific repair for Google Chrome Desktop Android 153.
+ * Version-independent repair for Google Chrome Desktop Android builds running
+ * on phone layouts.
  *
- * Verified mappings:
- *   153.0.8010.49 / 801004974: ToolbarManager = hns,
- *                                coordinator Supplier = ums,
- *                                init Runnable = cms
- *   153.0.8010.52 / 801005274: ToolbarManager = jns,
- *                                coordinator Supplier = wms,
- *                                init Runnable = ems
- *
- * ChromeTabbedActivity.a3(...)
- *   -> zd4.P2() : ToolbarManager
- *   -> ToolbarManager.J1 : rr9
- *   -> rr9.f0 = true
- *
- * rr9 is ExtensionsToolbarCoordinatorImpl.
- * ToolbarManager.l(...) is ToolbarManager.initializeWithNative(...).
- *
- * The normal creation block is skipped when either the extensions ViewStub
- * is absent or the ChromeAndroidTask supplier returns null.
+ * R8 symbols are resolved from the installed Chrome DEX at runtime. Normal
+ * operation therefore does not depend on obfuscated class, field, method, or
+ * synthetic-class names.
  */
 public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final String TAG = "DesktopChromeInit";
     private static final String TARGET_PACKAGE = "com.android.chrome";
 
-    // Resource IDs observed directly in 801004974. Names are preferred and
-    // these values are only fallbacks for this exact build.
-    private static final int FALLBACK_EXTENSIONS_MENU_ID = 0x7f01054d;
-    private static final int FALLBACK_EXTENSIONS_STUB_ID = 0x7f01056a;
-    private static final int FALLBACK_EXTENSIONS_LAYOUT_ID = 0x7f0e0190;
-
     private static volatile ClassLoader chromeClassLoader;
-
-    /**
-     * ToolbarManager.l() receives two objects which Chrome captures into the synthetic
-     * ums Supplier used to build rr9. Keep them weakly keyed by ToolbarManager
-     * so the repair can reproduce Chrome's own construction path later.
-     */
-    private static final Map<Object, InitCapture> INIT_CAPTURES =
-            Collections.synchronizedMap(new WeakHashMap<>());
+    private static volatile ChromeDexResolver.Symbols resolvedSymbols;
+    private static volatile Class<?> toolbarManagerClass;
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
 
-    private static final ThreadLocal<Boolean> POP_OUT_RECONCILING =
+    private static final ThreadLocal<ToolbarSwap> TOOLBAR_SWAP =
             new ThreadLocal<>();
+
+    private static final Map<Activity, Object> ACTIVE_TOOLBAR_MANAGERS =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final Map<Activity, Object> ACTIVE_COORDINATORS =
             Collections.synchronizedMap(new WeakHashMap<>());
@@ -79,11 +56,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<View, Boolean> BOTTOM_BAR_SLOT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    /**
-     * RecyclerViews currently containing one temporary unpinned action that
-     * exists only to anchor an extension popup. This action must never consume
-     * another Bottom Bar slot, otherwise the native buttons move horizontally.
-     */
     private static final Map<View, Boolean> TEMP_POPOUT_ACTION_LISTS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -93,13 +65,31 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    private static final class InitCapture {
-        final Object contextMenuFactory;
-        final Object extensionSupport;
+    private static final class ToolbarSwap {
+        final Object manager;
+        final Field toolbarField;
+        final ViewGroup realToolbar;
+        final ViewGroup temporaryToolbar;
 
-        InitCapture(Object contextMenuFactory, Object extensionSupport) {
-            this.contextMenuFactory = contextMenuFactory;
-            this.extensionSupport = extensionSupport;
+        ToolbarSwap(
+                Object manager,
+                Field toolbarField,
+                ViewGroup realToolbar,
+                ViewGroup temporaryToolbar) {
+            this.manager = manager;
+            this.toolbarField = toolbarField;
+            this.realToolbar = realToolbar;
+            this.temporaryToolbar = temporaryToolbar;
+        }
+    }
+
+    private static final class GraphNode {
+        final Object value;
+        final int depth;
+
+        GraphNode(Object value, int depth) {
+            this.value = value;
+            this.depth = depth;
         }
     }
 
@@ -113,247 +103,389 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         chromeClassLoader = lpparam.classLoader;
         log("loading into " + lpparam.processName);
 
-        installToolbarInitCapture(lpparam.classLoader);
-        installExtensionsMenuRepair(lpparam.classLoader);
+        try {
+            resolvedSymbols = ChromeDexResolver.resolve(lpparam.appInfo);
+            log("DEX symbols resolved: " + resolvedSymbols.describe());
+        } catch (Throwable t) {
+            log("DEX symbol resolution failed; refusing unsafe obfuscated-name "
+                    + "fallbacks: " + stackSummary(t));
+            return;
+        }
+
+        installExtensionSupplierToolbarBridge(
+                lpparam.classLoader, resolvedSymbols);
+        installToolbarInitializationHook(
+                lpparam.classLoader, resolvedSymbols);
+        installExtensionsMenuRepair(
+                lpparam.classLoader, resolvedSymbols);
         installExtensionPopupWidthBridge(lpparam.classLoader);
         installExtensionPopupDismissCleanup(lpparam.classLoader);
     }
 
-    /**
-     * Resolve ToolbarManager without depending on its R8 class name.
-     *
-     * ChromeActivity.P2() has remained the accessor across the builds we have
-     * inspected. Its return type is obfuscated, so validate that type by
-     * looking for the initializeWithNative-shaped method instead of checking
-     * names such as hns/jns or fields such as J1/d0.
-     */
-    private static Class<?> resolveToolbarManagerClass(ClassLoader classLoader) {
-        Class<?> chromeTabbedActivity = XposedHelpers.findClassIfExists(
-                "org.chromium.chrome.browser.ChromeTabbedActivity",
-                classLoader);
-        if (chromeTabbedActivity != null) {
-            Class<?> owner = chromeTabbedActivity;
-            while (owner != null) {
-                try {
-                    Method p2 = owner.getDeclaredMethod("P2");
-                    Class<?> candidate = p2.getReturnType();
-                    if (findInitializeWithNativeMethod(candidate) != null) {
-                        log("resolved ToolbarManager structurally from P2(): "
-                                + candidate.getName());
-                        return candidate;
-                    }
-                } catch (NoSuchMethodException ignored) {
-                    // P2() is declared on a superclass in current builds.
-                } catch (Throwable t) {
-                    log("P2() ToolbarManager resolution failed on "
-                            + owner.getName() + ": " + stackSummary(t));
+    private static Class<?> classForDescriptor(
+            String descriptor, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        switch (descriptor) {
+            case "V": return void.class;
+            case "Z": return boolean.class;
+            case "B": return byte.class;
+            case "S": return short.class;
+            case "C": return char.class;
+            case "I": return int.class;
+            case "J": return long.class;
+            case "F": return float.class;
+            case "D": return double.class;
+            default:
+                if (descriptor.startsWith("[")) {
+                    return Class.forName(
+                            descriptor.replace('/', '.'),
+                            false,
+                            classLoader);
                 }
-                owner = owner.getSuperclass();
-            }
+                if (descriptor.startsWith("L")
+                        && descriptor.endsWith(";")) {
+                    String name = descriptor
+                            .substring(1, descriptor.length() - 1)
+                            .replace('/', '.');
+                    return Class.forName(name, false, classLoader);
+                }
+                throw new ClassNotFoundException(
+                        "Unsupported descriptor " + descriptor);
+        }
+    }
+
+    private static Class<?>[] classesForDescriptors(
+            String[] descriptors, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        Class<?>[] result = new Class<?>[descriptors.length];
+        for (int i = 0; i < descriptors.length; i++) {
+            result[i] = classForDescriptor(descriptors[i], classLoader);
+        }
+        return result;
+    }
+
+    private static void installExtensionSupplierToolbarBridge(
+            ClassLoader classLoader,
+            ChromeDexResolver.Symbols symbols) {
+        if (symbols.supplierToolbarTabletClassName == null) {
+            log("Extensions Supplier has no ToolbarTablet cast; bridge not needed");
+            return;
         }
 
-        // Compatibility-only fallbacks. Normal resolution above does not need
-        // the obfuscated class name.
-        for (String name : new String[]{"jns", "hns"}) {
-            Class<?> candidate =
-                    XposedHelpers.findClassIfExists(name, classLoader);
-            if (findInitializeWithNativeMethod(candidate) != null) {
-                log("resolved ToolbarManager by compatibility fallback: " + name);
-                return candidate;
-            }
+        try {
+            Class<?> managerClass = XposedHelpers.findClass(
+                    symbols.toolbarManagerClassName, classLoader);
+            toolbarManagerClass = managerClass;
+
+            Class<?> supplierClass = XposedHelpers.findClass(
+                    symbols.extensionSupplierClassName, classLoader);
+            Method get = supplierClass.getDeclaredMethod("get");
+            get.setAccessible(true);
+
+            XposedBridge.hookMethod(get, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object manager = findCapturedToolbarManager(
+                                param.thisObject, managerClass);
+                        if (manager == null) {
+                            return;
+                        }
+
+                        Field toolbarField = findToolbarViewField(manager);
+                        if (toolbarField == null) {
+                            log("Supplier bridge: toolbar field not found");
+                            return;
+                        }
+
+                        Object toolbarValue = toolbarField.get(manager);
+                        if (!(toolbarValue instanceof ViewGroup)) {
+                            return;
+                        }
+
+                        ViewGroup realToolbar = (ViewGroup) toolbarValue;
+                        Class<?> tabletClass = XposedHelpers.findClassIfExists(
+                                symbols.supplierToolbarTabletClassName,
+                                classLoader);
+                        if (tabletClass == null
+                                || tabletClass.isInstance(realToolbar)) {
+                            return;
+                        }
+
+                        ViewGroup temporaryTablet =
+                                createTemporaryToolbarTablet(
+                                        tabletClass, realToolbar);
+                        if (temporaryTablet == null) {
+                            return;
+                        }
+
+                        toolbarField.set(manager, temporaryTablet);
+                        TOOLBAR_SWAP.set(new ToolbarSwap(
+                                manager,
+                                toolbarField,
+                                realToolbar,
+                                temporaryTablet));
+                        log("Supplier bridge: temporarily substituted "
+                                + tabletClass.getName());
+                    } catch (Throwable t) {
+                        log("Supplier bridge preparation failed: "
+                                + stackSummary(t));
+                    }
+                }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    ToolbarSwap swap = TOOLBAR_SWAP.get();
+                    TOOLBAR_SWAP.remove();
+                    if (swap == null) {
+                        return;
+                    }
+
+                    try {
+                        swap.toolbarField.set(
+                                swap.manager, swap.realToolbar);
+                    } catch (Throwable t) {
+                        log("Supplier bridge restore failed: "
+                                + stackSummary(t));
+                    }
+
+                    try {
+                        if (param.getThrowable() == null) {
+                            Object coordinator = param.getResult();
+                            if (coordinator != null) {
+                                int replaced =
+                                        replaceTemporaryToolbarReferences(
+                                                coordinator,
+                                                swap.temporaryToolbar,
+                                                swap.realToolbar);
+                                log("Supplier bridge: restored ToolbarPhone; "
+                                        + "rebound " + replaced
+                                        + " retained reference(s)");
+                            }
+                        }
+                    } catch (Throwable t) {
+                        log("Supplier bridge rebind failed: "
+                                + stackSummary(t));
+                    }
+                }
+            });
+
+            log("installed structural Extensions Supplier bridge on "
+                    + symbols.extensionSupplierClassName + ".get()");
+        } catch (Throwable t) {
+            log("could not install Extensions Supplier bridge: "
+                    + stackSummary(t));
+        }
+    }
+
+    private static Object findCapturedToolbarManager(
+            Object supplier, Class<?> managerClass) {
+        if (supplier == null || managerClass == null) {
+            return null;
         }
 
+        Class<?> type = supplier.getClass();
+        while (type != null) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(
+                            field.getModifiers())
+                            || field.getType().isPrimitive()) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    Object value = field.get(supplier);
+                    if (managerClass.isInstance(value)) {
+                        return value;
+                    }
+                }
+            } catch (Throwable ignored) {}
+            type = type.getSuperclass();
+        }
         return null;
     }
 
-    /**
-     * Find ToolbarManager.initializeWithNative() by parameter shape.
-     *
-     * 801004974/801005274 both use nine arguments with Runnable at index 2 and
-     * View.OnClickListener at index 3. A relaxed pass is retained so an R8
-     * rename or a small signature extension does not immediately break the
-     * module.
-     */
-    private static Method findInitializeWithNativeMethod(Class<?> type) {
-        if (type == null) {
-            return null;
-        }
-
-        Method relaxed = null;
+    private static ViewGroup createTemporaryToolbarTablet(
+            Class<?> tabletClass, ViewGroup realToolbar) {
         try {
-            for (Method method : type.getDeclaredMethods()) {
-                Class<?>[] params = method.getParameterTypes();
-                if (method.getReturnType() != void.class) {
-                    continue;
-                }
-
-                if (params.length == 9
-                        && Runnable.class.isAssignableFrom(params[2])
-                        && View.OnClickListener.class.isAssignableFrom(params[3])) {
-                    method.setAccessible(true);
-                    return method;
-                }
-
-                if (params.length < 7 || params.length > 12) {
-                    continue;
-                }
-
-                boolean hasRunnable = false;
-                boolean hasClickListener = false;
-                for (Class<?> param : params) {
-                    hasRunnable |= Runnable.class.isAssignableFrom(param);
-                    hasClickListener |= View.OnClickListener.class.isAssignableFrom(param);
-                }
-
-                if (hasRunnable && hasClickListener) {
-                    if (relaxed != null) {
-                        // Ambiguous relaxed match: refuse to guess.
-                        relaxed = null;
-                        break;
-                    }
-                    relaxed = method;
-                }
-            }
+            java.lang.reflect.Constructor<?> constructor =
+                    tabletClass.getDeclaredConstructor(
+                            Context.class,
+                            android.util.AttributeSet.class);
+            constructor.setAccessible(true);
+            Object value = constructor.newInstance(
+                    ((View) realToolbar).getContext(), null);
+            return value instanceof ViewGroup
+                    ? (ViewGroup) value
+                    : null;
         } catch (Throwable t) {
-            log("initializeWithNative structural scan failed on "
-                    + type.getName() + ": " + stackSummary(t));
+            log("could not instantiate temporary ToolbarTablet: "
+                    + stackSummary(t));
             return null;
         }
-
-        if (relaxed != null) {
-            relaxed.setAccessible(true);
-            log("using relaxed initializeWithNative match: "
-                    + type.getName() + "." + relaxed.getName()
-                    + " args=" + relaxed.getParameterTypes().length);
-        }
-        return relaxed;
     }
 
-    /**
-     * Primary compatibility strategy:
-     *
-     * 1. On unknown builds, inject the extensions ViewStub before Chrome's own
-     *    initializeWithNative() runs and prefer Chrome-owned construction.
-     * 2. On the reverse-engineered .49/.52 phone builds, deliberately leave
-     *    the extensions ViewStub absent during initializeWithNative(). Their
-     *    synthetic Supplier hard-casts ToolbarPhone to ToolbarTablet.
-     * 3. Keep Chrome's real ToolbarPhone installed while the rest of
-     *    initializeWithNative() runs.
-     * 4. After initialization, known builds create the extensions coordinator
-     *    through the fallback, which substitutes ToolbarTablet only around the
-     *    coordinator factory call and immediately restores ToolbarPhone.
-     *
-     * This removes the normal runtime dependency on synthetic R8 classes such
-     * as ums/wms and cms/ems.
-     */
-    private static void installToolbarInitCapture(ClassLoader classLoader) {
-        Class<?> toolbarManager = resolveToolbarManagerClass(classLoader);
-        if (toolbarManager == null) {
-            log("ToolbarManager not found structurally");
-            return;
+    private static int replaceTemporaryToolbarReferences(
+            Object root,
+            ViewGroup temporaryToolbar,
+            ViewGroup realToolbar) {
+        if (root == null
+                || temporaryToolbar == null
+                || realToolbar == null) {
+            return 0;
         }
 
-        Method initialize = findInitializeWithNativeMethod(toolbarManager);
-        if (initialize == null) {
-            log("initializeWithNative-shaped method not found on "
-                    + toolbarManager.getName());
-            return;
-        }
+        java.util.ArrayDeque<GraphNode> queue =
+                new java.util.ArrayDeque<>();
+        java.util.IdentityHashMap<Object, Boolean> visited =
+                new java.util.IdentityHashMap<>();
+        queue.add(new GraphNode(root, 0));
 
-        XposedBridge.hookMethod(initialize, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                Object manager = param.thisObject;
-
-                // Retain the old capture only for the known-build emergency
-                // factory fallback. The generic path does not use these args.
-                if (param.args != null && param.args.length == 9) {
-                    INIT_CAPTURES.put(
-                            manager,
-                            new InitCapture(param.args[7], param.args[8]));
-                }
-
-                try {
-                    Activity activity = resolveToolbarManagerActivity(manager);
-                    if (activity != null) {
-                        String managerName = manager.getClass().getName();
-                        boolean knownPhoneDesktopBuild =
-                                "hns".equals(managerName) || "jns".equals(managerName);
-
-                        if (knownPhoneDesktopBuild) {
-                            // Do NOT inject the stub yet. On 801004974/801005274
-                            // Chrome's own extensions Supplier hard-casts c0 to
-                            // ToolbarTablet. Leaving the phone-layout stub absent
-                            // makes Chrome skip only that incompatible factory
-                            // block; repairCoordinator() runs it safely later.
-                            log("deferring extensions stub/factory until post-init fallback");
-                        } else {
-                            ensureExtensionsStub(activity, manager);
-                        }
-
-                        // Best-effort compatibility with the existing task-init
-                        // race. Failure here is non-fatal; Chrome may already
-                        // populate its task supplier during normal startup.
-                        if (getChromeAndroidTask(manager) == null) {
-                            retryChromeAndroidTaskInitialization(activity);
-                        }
-                    }
-                } catch (Throwable t) {
-                    log("generic pre-initialize preparation failed: "
-                            + stackSummary(t));
-                }
+        int replacements = 0;
+        int inspected = 0;
+        while (!queue.isEmpty() && inspected < 64) {
+            GraphNode node = queue.removeFirst();
+            Object object = node.value;
+            if (object == null
+                    || visited.put(object, Boolean.TRUE) != null) {
+                continue;
             }
+            inspected++;
 
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                Object manager = param.thisObject;
-
+            Class<?> type = object.getClass();
+            while (type != null) {
                 try {
-                    Activity activity = resolveToolbarManagerActivity(manager);
-                    if (activity == null) {
-                        log("could not resolve Activity after toolbar initialization");
-                        return;
-                    }
+                    for (Field field : type.getDeclaredFields()) {
+                        if (java.lang.reflect.Modifier.isStatic(
+                                field.getModifiers())
+                                || field.getType().isPrimitive()) {
+                            continue;
+                        }
+                        field.setAccessible(true);
+                        Object value = field.get(object);
+                        if (value == temporaryToolbar
+                                && field.getType().isInstance(realToolbar)) {
+                            field.set(object, realToolbar);
+                            replacements++;
+                            continue;
+                        }
 
-                    Object coordinator = findExtensionsCoordinator(manager);
-                    if (coordinator != null) {
+                        if (node.depth < 4
+                                && shouldTraverseCoordinatorObject(value)) {
+                            queue.addLast(
+                                    new GraphNode(
+                                            value, node.depth + 1));
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                type = type.getSuperclass();
+            }
+        }
+        return replacements;
+    }
+
+    private static boolean shouldTraverseCoordinatorObject(Object value) {
+        if (value == null
+                || value instanceof String
+                || value instanceof Number
+                || value instanceof Boolean
+                || value instanceof Character
+                || value instanceof Class<?>
+                || value.getClass().isEnum()) {
+            return false;
+        }
+
+        String name = value.getClass().getName();
+        if (value instanceof View) {
+            return name.contains(
+                    "toolbar.extensions.ExtensionActionListRecyclerView");
+        }
+
+        ClassLoader loader = value.getClass().getClassLoader();
+        return loader == chromeClassLoader
+                && (!name.contains(".")
+                    || name.startsWith(
+                            "org.chromium.chrome.browser.toolbar.extensions.")
+                    || name.startsWith(
+                            "org.chromium.chrome.browser.ui.extensions."));
+    }
+
+    private static void installToolbarInitializationHook(
+            ClassLoader classLoader,
+            ChromeDexResolver.Symbols symbols) {
+        try {
+            Class<?> managerClass = XposedHelpers.findClass(
+                    symbols.toolbarManagerClassName, classLoader);
+            toolbarManagerClass = managerClass;
+            Class<?>[] parameters = classesForDescriptors(
+                    symbols.initializeParameterDescriptors,
+                    classLoader);
+            Method initialize = managerClass.getDeclaredMethod(
+                    symbols.initializeMethodName, parameters);
+            initialize.setAccessible(true);
+
+            XposedBridge.hookMethod(initialize, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    Object manager = param.thisObject;
+                    try {
+                        Activity activity =
+                                resolveToolbarManagerActivity(manager);
+                        if (activity == null) {
+                            log("pre-init: ToolbarManager Activity not resolved");
+                            return;
+                        }
+
+                        ACTIVE_TOOLBAR_MANAGERS.put(activity, manager);
+                        ViewStub stub =
+                                ensureExtensionsStub(activity, manager);
+                        if (stub == null) {
+                            log("pre-init: Extensions ViewStub unavailable");
+                        }
+                    } catch (Throwable t) {
+                        log("pre-init structural preparation failed: "
+                                + stackSummary(t));
+                    }
+                }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Object manager = param.thisObject;
+                    try {
+                        Activity activity =
+                                resolveToolbarManagerActivity(manager);
+                        if (activity == null) {
+                            log("post-init: ToolbarManager Activity not resolved");
+                            return;
+                        }
+                        ACTIVE_TOOLBAR_MANAGERS.put(activity, manager);
+
+                        Object coordinator =
+                                findExtensionsCoordinator(manager);
+                        if (coordinator == null) {
+                            log("post-init: Chrome did not create Extensions "
+                                    + "coordinator; menu action will fail closed");
+                            return;
+                        }
+
                         ACTIVE_COORDINATORS.put(activity, coordinator);
                         scheduleRelocateExtensionsContainer(
                                 activity, coordinator, 0);
-                        log("Chrome-owned extensions initialization succeeded");
-                        return;
+                        log("Chrome-owned Extensions initialization succeeded");
+                    } catch (Throwable t) {
+                        log("post-init structural inspection failed: "
+                                + stackSummary(t));
                     }
-
-                    // Only the reverse-engineered .49/.52 mappings use the
-                    // synthetic-class fallback. Future builds stay on the
-                    // structural Chrome-owned path instead of guessing names.
-                    String managerName = manager.getClass().getName();
-                    if ("hns".equals(managerName) || "jns".equals(managerName)) {
-                        final View postTarget = findToolbarControlContainer(manager);
-                        if (postTarget != null) {
-                            postTarget.post(() -> {
-                                try {
-                                    if (repairCoordinator(activity, manager)) {
-                                        log("legacy factory fallback succeeded");
-                                    }
-                                } catch (Throwable t) {
-                                    log("legacy factory fallback failed: "
-                                            + stackSummary(t));
-                                }
-                            });
-                        }
-                    } else {
-                        log("Chrome-owned initialization produced no extensions coordinator; "
-                                + "unknown build left untouched rather than guessing R8 names");
-                    }
-                } catch (Throwable t) {
-                    log("post-initialize inspection failed: " + stackSummary(t));
                 }
-            }
-        });
+            });
 
-        log("installed structural initializeWithNative hook on "
-                + toolbarManager.getName() + "." + initialize.getName());
+            log("installed structural ToolbarManager initializer hook on "
+                    + symbols.toolbarManagerClassName + "."
+                    + symbols.initializeMethodName);
+        } catch (Throwable t) {
+            log("could not hook ToolbarManager initializer: "
+                    + stackSummary(t));
+        }
     }
 
     private static Activity resolveToolbarManagerActivity(Object manager) {
@@ -429,14 +561,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
         }
 
-        // Compatibility fast path, followed by a structural field scan.
-        try {
-            Object named = XposedHelpers.getObjectField(manager, "d0");
-            if (named instanceof View) {
-                return (View) named;
-            }
-        } catch (Throwable ignored) {}
-
         Class<?> type = manager != null ? manager.getClass() : null;
         while (type != null) {
             try {
@@ -461,13 +585,31 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return null;
         }
 
-        // Compatibility fast path for known builds.
-        try {
-            Object named = XposedHelpers.getObjectField(manager, "J1");
-            if (named != null) {
-                return named;
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (symbols != null) {
+            try {
+                Class<?> type = manager.getClass();
+                while (type != null) {
+                    try {
+                        Field field = type.getDeclaredField(
+                                symbols.coordinatorFieldName);
+                        field.setAccessible(true);
+                        Object value = field.get(manager);
+                        if (value != null
+                                && symbols.coordinatorClassName.equals(
+                                        value.getClass().getName())) {
+                            return value;
+                        }
+                        break;
+                    } catch (NoSuchFieldException ignored) {
+                        type = type.getSuperclass();
+                    }
+                }
+            } catch (Throwable t) {
+                log("resolved coordinator field read failed: "
+                        + stackSummary(t));
             }
-        } catch (Throwable ignored) {}
+        }
 
         Class<?> type = manager.getClass();
         while (type != null) {
@@ -495,215 +637,103 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         return null;
     }
 
-    private static void installExtensionsMenuRepair(ClassLoader classLoader) {
+    private static void installExtensionsMenuRepair(
+            ClassLoader classLoader,
+            ChromeDexResolver.Symbols symbols) {
         Class<?> chromeTabbedActivity = XposedHelpers.findClassIfExists(
                 "org.chromium.chrome.browser.ChromeTabbedActivity",
-                classLoader
-        );
+                classLoader);
         if (chromeTabbedActivity == null) {
             log("ChromeTabbedActivity not found");
             return;
         }
 
-        XposedBridge.hookAllMethods(chromeTabbedActivity, "a3", new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args == null
-                        || param.args.length != 4
-                        || !(param.args[0] instanceof Integer)
-                        || !(param.thisObject instanceof Activity)) {
-                    return;
-                }
+        try {
+            Class<?> fourthParameter = classForDescriptor(
+                    symbols.menuHandlerFourthParameterDescriptor,
+                    classLoader);
+            Method handler = chromeTabbedActivity.getDeclaredMethod(
+                    symbols.menuHandlerMethodName,
+                    int.class,
+                    boolean.class,
+                    android.os.Bundle.class,
+                    fourthParameter);
+            handler.setAccessible(true);
 
-                Activity activity = (Activity) param.thisObject;
-                int id = (Integer) param.args[0];
-                if (!isExtensionsMenuAction(activity, id)) {
-                    return;
-                }
+            XposedBridge.hookMethod(handler, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null
+                            || param.args.length != 4
+                            || !(param.args[0] instanceof Integer)
+                            || !(param.thisObject instanceof Activity)) {
+                        return;
+                    }
 
-                EXTENSIONS_ACTION.set(Boolean.TRUE);
+                    Activity activity = (Activity) param.thisObject;
+                    int id = (Integer) param.args[0];
+                    if (!isExtensionsMenuAction(activity, id)) {
+                        return;
+                    }
 
-                try {
-                    // Do not use XposedHelpers.callMethod() on ChromeActivity.
-                    // Its best-match implementation enumerates declared methods,
-                    // which attempts to resolve Android APIs that do not exist on
-                    // the phone build (notably android.app.HandoffActivityData).
-                    Object toolbarManager = invokeExactNoArg(activity, "P2");
-                    if (toolbarManager == null) {
-                        log("P2() returned null ToolbarManager");
+                    EXTENSIONS_ACTION.set(Boolean.TRUE);
+
+                    Object manager = ACTIVE_TOOLBAR_MANAGERS.get(activity);
+                    if (manager == null
+                            || (toolbarManagerClass != null
+                                && !toolbarManagerClass.isInstance(manager))) {
+                        log("Extensions action: active ToolbarManager unavailable; "
+                                + "suppressing unsafe action");
                         param.setResult(true);
                         return;
                     }
 
-                    Object coordinator = findExtensionsCoordinator(toolbarManager);
-                    if (coordinator != null) {
+                    Object coordinator =
+                            findExtensionsCoordinator(manager);
+                    if (coordinator == null) {
+                        log("Extensions action: coordinator unavailable; "
+                                + "suppressing unsafe action");
+                        param.setResult(true);
+                    }
+                }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    boolean extensionAction = Boolean.TRUE.equals(
+                            EXTENSIONS_ACTION.get());
+                    EXTENSIONS_ACTION.remove();
+
+                    if (!extensionAction) {
                         return;
                     }
 
-                    String managerName = toolbarManager.getClass().getName();
-                    if ("hns".equals(managerName) || "jns".equals(managerName)) {
-                        log("Extensions action hit without coordinator; using known-build fallback");
-                        if (!repairCoordinator(activity, toolbarManager)) {
-                            log("repair incomplete; suppressing Extensions action");
-                            param.setResult(true);
-                        }
-                    } else {
-                        // Unknown builds use the Chrome-owned structural startup
-                        // path. Never guess synthetic R8 names from a menu click.
-                        log("Extensions action hit without coordinator on unknown build; suppressing unsafe action");
+                    Throwable t = param.getThrowable();
+                    if (t instanceof NullPointerException) {
+                        log("suppressed Extensions-menu NPE: "
+                                + stackSummary(t));
                         param.setResult(true);
                     }
-                } catch (Throwable t) {
-                    log("repair hook failed: " + stackSummary(t));
-                    param.setResult(true);
                 }
-            }
+            });
 
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                boolean extensionAction = Boolean.TRUE.equals(
-                        EXTENSIONS_ACTION.get());
-                EXTENSIONS_ACTION.remove();
-
-                if (!extensionAction) {
-                    return;
-                }
-
-                Throwable t = param.getThrowable();
-                if (t instanceof NullPointerException) {
-                    log("suppressed known Extensions-menu NPE: "
-                            + stackSummary(t));
-                    param.setResult(true);
-                }
-            }
-        });
+            log("installed structural Extensions menu hook on "
+                    + symbols.menuHandlerMethodName);
+        } catch (Throwable t) {
+            log("could not hook structural Extensions menu handler: "
+                    + stackSummary(t));
+        }
     }
 
-    private static boolean isExtensionsMenuAction(Activity activity, int id) {
+    private static boolean isExtensionsMenuAction(
+            Activity activity, int id) {
         try {
-            String entryName = activity.getResources().getResourceEntryName(id);
-            if ("extensions_menu_menu_id".equals(entryName)) {
-                return true;
-            }
+            return "extensions_menu_menu_id".equals(
+                    activity.getResources().getResourceEntryName(id));
         } catch (Resources.NotFoundException ignored) {
-            // Fall back to the exact ID decoded from 801004974.
-        }
-        return id == FALLBACK_EXTENSIONS_MENU_ID;
-    }
-
-    private static boolean repairCoordinator(
-            Activity activity, Object toolbarManager) throws Throwable {
-
-        Object existing = XposedHelpers.getObjectField(toolbarManager, "J1");
-        if (existing != null) {
-            ACTIVE_COORDINATORS.put(activity, existing);
-            scheduleRelocateExtensionsContainer(activity, existing, 0);
-            return true;
-        }
-
-        InitCapture capture = INIT_CAPTURES.get(toolbarManager);
-        if (capture == null) {
-            log("no ToolbarManager.l() capture; force-stop Chrome after enabling module");
             return false;
-        }
-
-        Object chromeAndroidTask = getChromeAndroidTask(toolbarManager);
-        if (chromeAndroidTask == null) {
-            log("ToolbarManager.D1.get() == null; retrying ChromeActivity.S2()");
-            retryChromeAndroidTaskInitialization(activity);
-            chromeAndroidTask = getChromeAndroidTask(toolbarManager);
-        }
-
-        if (chromeAndroidTask == null) {
-            log("ChromeAndroidTask is still null");
-            return false;
-        }
-
-        ViewStub stub = ensureExtensionsStub(activity, toolbarManager);
-        if (stub == null) {
-            log("could not obtain/create extensions_toolbar_container_stub");
-            return false;
-        }
-
-        Object coordinator = createCoordinatorThroughChrome(
-                toolbarManager,
-                chromeAndroidTask,
-                stub,
-                capture
-        );
-
-        if (coordinator == null) {
-            log("Chrome coordinator factory returned null");
-            return false;
-        }
-
-        XposedHelpers.setObjectField(toolbarManager, "J1", coordinator);
-        registerCoordinatorWithToolbar(toolbarManager, coordinator);
-
-        Object verify = XposedHelpers.getObjectField(toolbarManager, "J1");
-        boolean repaired = verify != null;
-        log(repaired
-                ? "repair successful: ToolbarManager.J1 initialized"
-                : "repair failed: ToolbarManager.J1 remained null");
-
-        if (repaired) {
-            ACTIVE_COORDINATORS.put(activity, coordinator);
-            scheduleRelocateExtensionsContainer(activity, coordinator, 0);
-        }
-        return repaired;
-    }
-
-    /**
-     * ToolbarManager.D1 is the Supplier used by ToolbarManager.initializeWithNative().
-     */
-    private static Object getChromeAndroidTask(Object toolbarManager) {
-        try {
-            Object supplier = XposedHelpers.getObjectField(
-                    toolbarManager, "D1");
-            if (supplier == null) {
-                return null;
-            }
-            return XposedHelpers.callMethod(supplier, "get");
-        } catch (Throwable t) {
-            log("reading ToolbarManager.D1 failed: " + t);
-            return null;
         }
     }
 
-    /**
-     * ChromeTabbedActivity.A() calls:
-     *   S2(0, F3, O2)
-     * during startup. If the task supplier was not populated at that moment,
-     * retry that same Chrome-owned initialization route.
-     */
-    private static void retryChromeAndroidTaskInitialization(Activity activity) {
-        try {
-            int taskId = XposedHelpers.getIntField(activity, "F3");
-            Object tabModelSelector = XposedHelpers.getObjectField(
-                    activity, "O2");
-            if (tabModelSelector == null) {
-                log("cannot retry S2(): O2 is null");
-                return;
-            }
-
-            invokeThreeArgExactByHierarchy(
-                    activity,
-                    "S2",
-                    0,
-                    taskId,
-                    tabModelSelector
-            );
-            log("retried ChromeActivity.S2(0, F3, O2) without method enumeration");
-        } catch (Throwable t) {
-            log("ChromeActivity.S2 retry failed: " + stackSummary(t));
-        }
-    }
-
-    /**
-     * ToolbarManager.l() searches ToolbarManager.d0 (ToolbarControlContainer) for
-     * extensions_toolbar_container_stub. Phone layouts can omit that stub,
-     * which causes Chrome to skip coordinator construction.
-     */
     private static ViewStub ensureExtensionsStub(
             Activity activity, Object toolbarManager) {
 
@@ -721,7 +751,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     TARGET_PACKAGE
             );
             if (stubId == 0) {
-                stubId = FALLBACK_EXTENSIONS_STUB_ID;
+                log("extensions_toolbar_container_stub resource not found");
+                return null;
             }
 
             View existing = container.findViewById(stubId);
@@ -746,16 +777,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     TARGET_PACKAGE
             );
             if (layoutId == 0) {
-                layoutId = FALLBACK_EXTENSIONS_LAYOUT_ID;
+                log("extensions_toolbar_container layout resource not found");
+                return null;
             }
 
             ViewStub injected = new ViewStub(container.getContext());
             injected.setId(stubId);
-            injected.setInflatedId(
-                    resources.getIdentifier(
-                            "extensions_toolbar_container",
-                            "id",
-                            TARGET_PACKAGE));
+            int inflatedId = resources.getIdentifier(
+                    "extensions_toolbar_container",
+                    "id",
+                    TARGET_PACKAGE);
+            if (inflatedId != 0) {
+                injected.setInflatedId(inflatedId);
+            }
             injected.setLayoutResource(layoutId);
 
             ViewGroup group = (ViewGroup) container;
@@ -777,313 +811,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("stub repair failed: " + stackSummary(t));
             return null;
         }
-    }
-
-    /**
-     * Reproduce only the rr9 creation block from ToolbarManager.l().
-     *
-     * Original 801004974 flow:
-     *   profile = ToolbarManager.t0.h().f()
-     *   key = new se4(rr9.class, profile, (wl) ToolbarManager.X0)
-     *   factory = new ums(...)
-     *   rr9 = (rr9) bf4.e(key, factory)
-     *   ToolbarManager.J1 = rr9
-     */
-    private static Object createCoordinatorThroughChrome(
-            Object toolbarManager,
-            Object chromeAndroidTask,
-            ViewStub stub,
-            InitCapture capture) throws Throwable {
-
-        ClassLoader cl = chromeClassLoader;
-        Class<?> rr9Class = XposedHelpers.findClass("rr9", cl);
-        Class<?> se4Class = XposedHelpers.findClass("se4", cl);
-
-        // R8 renamed these synthetic classes between 801004974 and 801005274.
-        // Do not select by "class exists": 801005274 still contains unrelated
-        // classes named ums/cms. Select them from the resolved ToolbarManager.
-        final String toolbarManagerName = toolbarManager.getClass().getName();
-        final String supplierClassName;
-        final String initRunnableClassName;
-        if ("jns".equals(toolbarManagerName)) {
-            supplierClassName = "wms";
-            initRunnableClassName = "ems";
-        } else if ("hns".equals(toolbarManagerName)) {
-            supplierClassName = "ums";
-            initRunnableClassName = "cms";
-        } else {
-            throw new IllegalStateException(
-                    "Unsupported ToolbarManager mapping: " + toolbarManagerName);
-        }
-
-        Class<?> supplierClass =
-                XposedHelpers.findClass(supplierClassName, cl);
-        Class<?> initRunnableClass =
-                XposedHelpers.findClass(initRunnableClassName, cl);
-
-        Object tabModelSelector = XposedHelpers.getObjectField(
-                toolbarManager, "t0");
-        if (tabModelSelector == null) {
-            log("ToolbarManager.t0 == null");
-            return null;
-        }
-
-        Object tabModel = XposedHelpers.callMethod(tabModelSelector, "h");
-        if (tabModel == null) {
-            log("ToolbarManager.t0.h() == null");
-            return null;
-        }
-
-        Object profile = XposedHelpers.callMethod(tabModel, "f");
-        if (profile == null) {
-            log("TabModel.f() profile == null");
-            return null;
-        }
-
-        Object windowAndroid = XposedHelpers.getObjectField(
-                toolbarManager, "X0");
-        if (windowAndroid == null) {
-            log("ToolbarManager.X0 == null");
-            return null;
-        }
-
-        Object key = XposedHelpers.newInstance(
-                se4Class,
-                rr9Class,
-                profile,
-                windowAndroid
-        );
-
-        // ToolbarManager.l() creates cms(byte 8), stores hns in cms.T, and captures the
-        // Runnable into ums.Y.
-        Object initRunnable = XposedHelpers.newInstance(
-                initRunnableClass, (byte) 8);
-        XposedHelpers.setObjectField(
-                initRunnable, "T", toolbarManager);
-
-        // ums has no declared constructor in the optimized DEX. Chrome itself
-        // allocates it then directly invokes Object.<init>(); Unsafe gives us
-        // the same zero-initialized instance without inventing a constructor.
-        Object supplier = allocateWithoutConstructor(supplierClass);
-
-        XposedHelpers.setObjectField(supplier, "S", toolbarManager);
-        XposedHelpers.setObjectField(supplier, "T", stub);
-        XposedHelpers.setObjectField(
-                supplier, "U", chromeAndroidTask);
-        XposedHelpers.setObjectField(supplier, "V", profile);
-        XposedHelpers.setObjectField(
-                supplier, "W", capture.contextMenuFactory);
-        XposedHelpers.setObjectField(
-                supplier, "X", capture.extensionSupport);
-        XposedHelpers.setObjectField(supplier, "Y", initRunnable);
-
-        // Extensions in this Desktop build assumes ToolbarTablet during
-        // construction. On a phone, ToolbarManager.c0 is ToolbarPhone, and ums.get()
-        // performs a hard cast to ToolbarTablet even though it only keeps that
-        // value as a ViewGroup parent for RecyclerView transitions.
-        //
-        // Temporarily provide a minimal ToolbarTablet instance for the factory,
-        // restore the real ToolbarPhone immediately afterwards, then replace
-        // the retained ViewGroup reference with the real toolbar.
-        Object realToolbar = XposedHelpers.getObjectField(toolbarManager, "c0");
-        Object temporaryTablet = null;
-        boolean toolbarSwapped = false;
-
-        Class<?> toolbarTabletClass = XposedHelpers.findClass(
-                "org.chromium.chrome.browser.toolbar.top.ToolbarTablet", cl);
-
-        if (realToolbar != null
-                && !toolbarTabletClass.isInstance(realToolbar)) {
-            if (!(realToolbar instanceof ViewGroup)) {
-                log("ToolbarManager.c0 is neither ToolbarTablet nor ViewGroup: "
-                        + realToolbar.getClass().getName());
-                return null;
-            }
-
-            java.lang.reflect.Constructor<?> constructor =
-                    toolbarTabletClass.getDeclaredConstructor(
-                            android.content.Context.class,
-                            android.util.AttributeSet.class);
-            constructor.setAccessible(true);
-
-            temporaryTablet = constructor.newInstance(
-                    ((View) realToolbar).getContext(),
-                    null
-            );
-
-            XposedHelpers.setObjectField(
-                    toolbarManager, "c0", temporaryTablet);
-            toolbarSwapped = true;
-            log("temporarily substituted ToolbarTablet for ToolbarPhone");
-        }
-
-        Object coordinator;
-        try {
-            Class<?> bf4Class = XposedHelpers.findClass("bf4", cl);
-            java.lang.reflect.Method factoryMethod =
-                    bf4Class.getDeclaredMethod(
-                            "e",
-                            se4Class,
-                            java.util.function.Supplier.class);
-            factoryMethod.setAccessible(true);
-            coordinator = factoryMethod.invoke(
-                    chromeAndroidTask, key, supplier);
-        } finally {
-            if (toolbarSwapped) {
-                XposedHelpers.setObjectField(
-                        toolbarManager, "c0", realToolbar);
-                log("restored real ToolbarPhone after coordinator construction");
-            }
-        }
-
-        if (coordinator == null) {
-            return null;
-        }
-
-        if (!rr9Class.isInstance(coordinator)) {
-            log("factory returned unexpected class: "
-                    + coordinator.getClass().getName());
-            return null;
-        }
-
-        if (toolbarSwapped && realToolbar instanceof ViewGroup) {
-            try {
-                Object actionListCoordinator =
-                        XposedHelpers.getObjectField(coordinator, "V");
-                if (actionListCoordinator != null) {
-                    Object recycler = XposedHelpers.getObjectField(
-                            actionListCoordinator, "T");
-                    if (recycler != null) {
-                        XposedHelpers.setObjectField(
-                                recycler, "I1", realToolbar);
-                        log("rebound Extensions RecyclerView parent to ToolbarPhone");
-                    }
-                }
-            } catch (Throwable t) {
-                log("failed to rebind Extensions RecyclerView parent: "
-                        + stackSummary(t));
-            }
-        }
-
-        return coordinator;
-    }
-
-    /**
-     * ToolbarManager.l() additionally calls ToolbarManager.b0.T.Y(rr9) after successful creation.
-     * Keep that side effect because it wires the coordinator back into the
-     * surrounding toolbar state.
-     */
-    private static void registerCoordinatorWithToolbar(
-            Object toolbarManager, Object coordinator) {
-        try {
-            Object trs = XposedHelpers.getObjectField(
-                    toolbarManager, "b0");
-            if (trs == null) {
-                return;
-            }
-
-            Object ols = XposedHelpers.getObjectField(trs, "T");
-            if (ols == null) {
-                return;
-            }
-
-            XposedHelpers.callMethod(ols, "Y", coordinator);
-        } catch (Throwable t) {
-            // The coordinator itself is already installed. Keep the menu
-            // usable even if this secondary registration changes later.
-            log("secondary toolbar registration failed: "
-                    + stackSummary(t));
-        }
-    }
-
-    /**
-     * Invoke a no-argument method without XposedHelpers' best-match lookup.
-     *
-     * Chrome Desktop references framework classes (for example
-     * android.app.HandoffActivityData) which are absent from this phone OS.
-     * Class.getDeclaredMethods() resolves every method signature and therefore
-     * throws NoClassDefFoundError before P2() can be invoked. Looking up the
-     * exact method name avoids resolving unrelated signatures.
-     */
-    private static Object invokeExactNoArg(Object receiver, String name)
-            throws Throwable {
-        Class<?> type = receiver.getClass();
-        Throwable last = null;
-
-        while (type != null) {
-            try {
-                Method method = type.getDeclaredMethod(name);
-                method.setAccessible(true);
-                return method.invoke(receiver);
-            } catch (NoSuchMethodException e) {
-                last = e;
-                type = type.getSuperclass();
-            }
-        }
-
-        throw new NoSuchMethodException(
-                receiver.getClass().getName() + "." + name + "()"
-                        + (last != null ? " not found" : ""));
-    }
-
-    /**
-     * Same idea for S2(int, int, TabModelSelector). The exact third parameter
-     * type is obfuscated, so try the runtime class, its superclasses and
-     * interfaces one-by-one with getDeclaredMethod(). This still never calls
-     * getDeclaredMethods(), so unrelated unavailable Android API types are not
-     * resolved.
-     */
-    private static Object invokeThreeArgExactByHierarchy(
-            Object receiver,
-            String name,
-            int first,
-            int second,
-            Object third) throws Throwable {
-
-        if (third == null) {
-            throw new NullPointerException("third argument is null");
-        }
-
-        java.util.LinkedHashSet<Class<?>> candidates =
-                new java.util.LinkedHashSet<>();
-        collectTypeCandidates(third.getClass(), candidates);
-
-        Class<?> owner = receiver.getClass();
-        while (owner != null) {
-            for (Class<?> thirdType : candidates) {
-                try {
-                    Method method = owner.getDeclaredMethod(
-                            name,
-                            int.class,
-                            int.class,
-                            thirdType
-                    );
-                    method.setAccessible(true);
-                    return method.invoke(receiver, first, second, third);
-                } catch (NoSuchMethodException ignored) {
-                    // Try the next exact candidate without enumerating methods.
-                }
-            }
-            owner = owner.getSuperclass();
-        }
-
-        throw new NoSuchMethodException(
-                receiver.getClass().getName() + "." + name
-                        + "(int,int,<third>)");
-    }
-
-    private static void collectTypeCandidates(
-            Class<?> type,
-            java.util.LinkedHashSet<Class<?>> out) {
-        if (type == null || !out.add(type)) {
-            return;
-        }
-
-        for (Class<?> iface : type.getInterfaces()) {
-            collectTypeCandidates(iface, out);
-        }
-
-        collectTypeCandidates(type.getSuperclass(), out);
     }
 
     /**
@@ -1609,15 +1336,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // Known-build fast path.
-        try {
-            Object old = XposedHelpers.getObjectField(actionListView, "I1");
-            if (old instanceof ViewGroup) {
-                XposedHelpers.setObjectField(actionListView, "I1", newRoot);
-                return;
-            }
-        } catch (Throwable ignored) {}
-
         // Structural fallback: ExtensionActionListRecyclerView retains a
         // ViewGroup transition root that initially points at ToolbarPhone /
         // ToolbarTablet. Replace that field by identity/type rather than name.
@@ -1748,60 +1466,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
         }
         return null;
-    }
-
-    /**
-     * 801004974/801005274 release DEX mapping:
-     *   zo9 = ExtensionActionListMediator
-     *   zo9.n() = undoPopout()
-     *   zo9.g() = reconcileActionItems()
-     *
-     * Desktop/Tablet normally gets a toolbar width pass immediately after
-     * undoPopout(), which reconciles the model and removes the temporary
-     * unpinned action. ToolbarPhone never performs that pass, leaving the
-     * icon visible. Hook the exact state transition instead of popup.destroy().
-     */
-    private static void installPopoutUndoReconcile(ClassLoader classLoader) {
-        Class<?> mediatorClass = XposedHelpers.findClassIfExists("zo9", classLoader);
-        if (mediatorClass == null) {
-            log("zo9 mediator not found; pop-out cleanup unavailable");
-            return;
-        }
-
-        try {
-            Method undoPopout = mediatorClass.getDeclaredMethod("n");
-            undoPopout.setAccessible(true);
-
-            XposedBridge.hookMethod(
-                    undoPopout,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            if (Boolean.TRUE.equals(POP_OUT_RECONCILING.get())) {
-                                return;
-                            }
-
-                            POP_OUT_RECONCILING.set(Boolean.TRUE);
-                            try {
-                                Method reconcile = param.thisObject.getClass()
-                                        .getDeclaredMethod("g");
-                                reconcile.setAccessible(true);
-                                reconcile.invoke(param.thisObject);
-
-                                scheduleTemporaryPopoutCleanup();
-                                log("undoPopout cleanup: reconciled action list; waiting for temporary icon removal");
-                            } catch (Throwable t) {
-                                log("undoPopout cleanup failed: " + stackSummary(t));
-                            } finally {
-                                POP_OUT_RECONCILING.remove();
-                            }
-                        }
-                    });
-
-            log("installed zo9.n() undoPopout reconcile hook");
-        } catch (Throwable t) {
-            log("could not hook zo9.n() undoPopout: " + stackSummary(t));
-        }
     }
 
     private static void scheduleTemporaryPopoutCleanup() {
@@ -2365,43 +2029,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     + stackSummary(t));
         }
         return null;
-    }
-
-    private static Object allocateWithoutConstructor(Class<?> type)
-            throws Throwable {
-        Throwable firstFailure = null;
-
-        for (String unsafeName : new String[]{
-                "sun.misc.Unsafe",
-                "jdk.internal.misc.Unsafe"
-        }) {
-            try {
-                Class<?> unsafeClass = Class.forName(unsafeName);
-                Field field;
-                try {
-                    field = unsafeClass.getDeclaredField("theUnsafe");
-                } catch (NoSuchFieldException e) {
-                    field = unsafeClass.getDeclaredField("THE_ONE");
-                }
-                field.setAccessible(true);
-                Object unsafe = field.get(null);
-
-                Method allocateInstance = unsafeClass.getDeclaredMethod(
-                        "allocateInstance", Class.class);
-                allocateInstance.setAccessible(true);
-                return allocateInstance.invoke(unsafe, type);
-            } catch (Throwable t) {
-                if (firstFailure == null) {
-                    firstFailure = t;
-                }
-            }
-        }
-
-        throw new IllegalStateException(
-                "Unable to allocate " + type.getName()
-                        + " without constructor",
-                firstFailure
-        );
     }
 
     private static String stackSummary(Throwable t) {
