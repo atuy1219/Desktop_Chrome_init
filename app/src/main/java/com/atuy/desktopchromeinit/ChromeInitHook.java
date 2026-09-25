@@ -55,6 +55,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static final Map<Activity, Object> ACTIVE_TOOLBAR_MANAGERS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    private static final Map<Object, Object[]> INITIALIZE_ARGUMENTS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final Map<Activity, Object> ACTIVE_COORDINATORS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -350,8 +353,28 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                         manager) == null) {
                                             log("emergency guard: Extensions "
                                                     + "coordinator is null; "
-                                                    + "suppressing action");
-                                            param.setResult(true);
+                                                    + "retrying Chrome's own "
+                                                    + "Supplier path");
+                                            boolean repaired = false;
+                                            try {
+                                                repaired =
+                                                        repairCoordinatorFromChromeSupplier(
+                                                                activity,
+                                                                manager);
+                                            } catch (Throwable t) {
+                                                log("emergency coordinator "
+                                                        + "repair failed: "
+                                                        + stackSummary(t));
+                                            }
+                                            if (!repaired
+                                                    || findExtensionsCoordinator(
+                                                            manager) == null) {
+                                                log("emergency guard: "
+                                                        + "coordinator is still "
+                                                        + "unavailable; "
+                                                        + "suppressing action");
+                                                param.setResult(true);
+                                            }
                                         }
                                     }
 
@@ -712,6 +735,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 protected void beforeHookedMethod(MethodHookParam param) {
                     Object manager = param.thisObject;
                     try {
+                        if (param.args != null) {
+                            INITIALIZE_ARGUMENTS.put(
+                                    manager, param.args.clone());
+                        }
                         Activity activity =
                                 resolveToolbarManagerActivity(manager);
                         if (activity == null) {
@@ -746,8 +773,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         Object coordinator =
                                 findExtensionsCoordinator(manager);
                         if (coordinator == null) {
-                            log("post-init: Chrome did not create Extensions "
-                                    + "coordinator; menu action will fail closed");
+                            log("post-init: Chrome skipped Extensions "
+                                    + "coordinator creation; trying deferred "
+                                    + "Chrome Supplier path");
+                            if (repairCoordinatorFromChromeSupplier(
+                                    activity, manager)) {
+                                coordinator =
+                                        findExtensionsCoordinator(manager);
+                            }
+                        }
+
+                        if (coordinator == null) {
+                            log("post-init: deferred Extensions creation is "
+                                    + "not ready; menu click will retry");
                             return;
                         }
 
@@ -920,6 +958,398 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         return null;
     }
 
+
+    /**
+     * Re-run only Chrome's Extensions coordinator factory after the original
+     * initializeWithNative() skipped it because its lazy support Supplier
+     * returned null. The synthetic Supplier class itself is resolved from DEX;
+     * none of its R8 field names are assumed here.
+     */
+    private static boolean repairCoordinatorFromChromeSupplier(
+            Activity activity, Object manager) throws Throwable {
+        if (activity == null || manager == null) {
+            return false;
+        }
+
+        Object existing = findExtensionsCoordinator(manager);
+        if (existing != null) {
+            ACTIVE_COORDINATORS.put(activity, existing);
+            return true;
+        }
+
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (symbols == null) {
+            log("deferred repair: DEX symbols unavailable");
+            return false;
+        }
+
+        Object[] initializeArgs = INITIALIZE_ARGUMENTS.get(manager);
+        if (initializeArgs == null) {
+            log("deferred repair: initializeWithNative arguments unavailable");
+            return false;
+        }
+
+        ViewStub stub = ensureExtensionsStub(activity, manager);
+        if (stub == null) {
+            log("deferred repair: Extensions ViewStub unavailable");
+            return false;
+        }
+
+        Class<?> supplierClass = XposedHelpers.findClassIfExists(
+                symbols.extensionSupplierClassName,
+                chromeClassLoader);
+        Class<?> coordinatorClass = XposedHelpers.findClassIfExists(
+                symbols.coordinatorClassName,
+                chromeClassLoader);
+        Class<?> profileClass = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.profiles.Profile",
+                chromeClassLoader);
+        if (supplierClass == null
+                || coordinatorClass == null
+                || profileClass == null) {
+            log("deferred repair: required Chrome classes unavailable");
+            return false;
+        }
+
+        Object profile = findSupplierResultByType(
+                manager, profileClass, false);
+        if (profile == null) {
+            log("deferred repair: Profile Supplier is not ready");
+            return false;
+        }
+
+        Object extensionFactory =
+                findExtensionFactorySupplierResult(
+                        manager, supplierClass);
+        if (extensionFactory == null) {
+            log("deferred repair: Extensions support Supplier is still null");
+            return false;
+        }
+
+        Object syntheticSupplier =
+                allocateWithoutConstructor(supplierClass);
+
+        final Object managerForCleanup = manager;
+        Runnable cleanup = () -> {
+            try {
+                setResolvedCoordinatorField(
+                        managerForCleanup, null);
+            } catch (Throwable t) {
+                log("Extensions cleanup callback failed: "
+                        + stackSummary(t));
+            }
+        };
+
+        int assigned = 0;
+        int unresolved = 0;
+        for (Field field : supplierClass.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(
+                    field.getModifiers())
+                    || field.getType().isPrimitive()) {
+                continue;
+            }
+
+            field.setAccessible(true);
+            Class<?> fieldType = field.getType();
+            Object value = null;
+
+            if (fieldType.isInstance(manager)) {
+                value = manager;
+            } else if (fieldType.isInstance(stub)) {
+                value = stub;
+            } else if (fieldType.isInstance(extensionFactory)) {
+                value = extensionFactory;
+            } else if (fieldType.isInstance(profile)) {
+                value = profile;
+            } else if (Runnable.class.isAssignableFrom(fieldType)) {
+                value = cleanup;
+            } else {
+                value = findMatchingInitializeArgument(
+                        fieldType, initializeArgs);
+                if (value == null) {
+                    value = findDirectFieldValueByType(
+                            manager, fieldType);
+                }
+            }
+
+            if (value == null) {
+                unresolved++;
+                log("deferred repair: unresolved Supplier capture "
+                        + fieldType.getName());
+                continue;
+            }
+
+            field.set(syntheticSupplier, value);
+            assigned++;
+        }
+
+        if (unresolved != 0) {
+            log("deferred repair: synthetic Supplier captures incomplete; "
+                    + "assigned=" + assigned
+                    + " unresolved=" + unresolved);
+            return false;
+        }
+
+        Method get = supplierClass.getDeclaredMethod("get");
+        get.setAccessible(true);
+
+        Object coordinator;
+        try {
+            coordinator = get.invoke(syntheticSupplier);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause != null) {
+                throw cause;
+            }
+            throw e;
+        }
+
+        if (coordinator == null
+                || !coordinatorClass.isInstance(coordinator)) {
+            log("deferred repair: Chrome Supplier returned "
+                    + (coordinator == null
+                        ? "null"
+                        : coordinator.getClass().getName()));
+            return false;
+        }
+
+        setResolvedCoordinatorField(manager, coordinator);
+        ACTIVE_COORDINATORS.put(activity, coordinator);
+        scheduleRelocateExtensionsContainer(
+                activity, coordinator, 0);
+        log("deferred repair: Chrome Extensions coordinator created "
+                + "through " + symbols.extensionSupplierClassName
+                + ".get()");
+        return true;
+    }
+
+    /**
+     * Find a lazy object owned by ToolbarManager by asking only fields whose
+     * declared type implements java.util.function.Supplier. Results are
+     * accepted only when they match the requested runtime type.
+     */
+    private static Object findSupplierResultByType(
+            Object manager,
+            Class<?> targetType,
+            boolean requireFactoryShape) {
+        if (manager == null || targetType == null) {
+            return null;
+        }
+
+        Class<?> type = manager.getClass();
+        int attempts = 0;
+        while (type != null && attempts < 32) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(
+                            field.getModifiers())
+                            || !java.util.function.Supplier.class
+                                    .isAssignableFrom(field.getType())) {
+                        continue;
+                    }
+
+                    field.setAccessible(true);
+                    Object supplier = field.get(manager);
+                    if (!(supplier instanceof java.util.function.Supplier)) {
+                        continue;
+                    }
+
+                    attempts++;
+                    try {
+                        Object value =
+                                ((java.util.function.Supplier<?>) supplier)
+                                        .get();
+                        if (value != null
+                                && targetType.isInstance(value)
+                                && (!requireFactoryShape
+                                    || hasExtensionFactoryShape(
+                                            value.getClass()))) {
+                            return value;
+                        }
+                    } catch (Throwable ignored) {
+                        // Lazy suppliers may legitimately be unavailable
+                        // during startup. Another field or a later retry can
+                        // still succeed.
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Continue with the superclass.
+            }
+            type = type.getSuperclass();
+        }
+        return null;
+    }
+
+    private static Object findExtensionFactorySupplierResult(
+            Object manager, Class<?> supplierClass) {
+        for (Field capture : supplierClass.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(
+                    capture.getModifiers())
+                    || capture.getType().isPrimitive()) {
+                continue;
+            }
+
+            Class<?> target = capture.getType();
+            String name = target.getName();
+            if (target.isInstance(manager)
+                    || ViewStub.class.isAssignableFrom(target)
+                    || Runnable.class.isAssignableFrom(target)
+                    || "org.chromium.chrome.browser.profiles.Profile"
+                            .equals(name)
+                    || "org.chromium.components.embedder_support.contextmenu."
+                            .concat("ContextMenuPopulatorFactory")
+                            .equals(name)) {
+                continue;
+            }
+
+            Object candidate = findSupplierResultByType(
+                    manager, target, true);
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasExtensionFactoryShape(Class<?> type) {
+        try {
+            for (Method method : type.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (parameters.length == 2
+                        && java.util.function.Supplier.class
+                                .isAssignableFrom(parameters[1])
+                        && method.getReturnType() != void.class) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+            return false;
+        }
+        return false;
+    }
+
+    private static Object findMatchingInitializeArgument(
+            Class<?> targetType, Object[] args) {
+        Object match = null;
+        if (args == null) {
+            return null;
+        }
+
+        for (Object arg : args) {
+            if (arg == null || !targetType.isInstance(arg)) {
+                continue;
+            }
+            if (match != null && match != arg) {
+                // Refuse ambiguous captures rather than guessing.
+                return null;
+            }
+            match = arg;
+        }
+        return match;
+    }
+
+    private static Object findDirectFieldValueByType(
+            Object owner, Class<?> targetType) {
+        if (owner == null || targetType == null) {
+            return null;
+        }
+
+        Object match = null;
+        Class<?> type = owner.getClass();
+        while (type != null) {
+            try {
+                for (Field field : type.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(
+                            field.getModifiers())
+                            || field.getType().isPrimitive()) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    Object value = field.get(owner);
+                    if (value == null
+                            || !targetType.isInstance(value)) {
+                        continue;
+                    }
+                    if (match != null && match != value) {
+                        return null;
+                    }
+                    match = value;
+                }
+            } catch (Throwable ignored) {}
+            type = type.getSuperclass();
+        }
+        return match;
+    }
+
+    private static void setResolvedCoordinatorField(
+            Object manager, Object coordinator) throws Throwable {
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (manager == null || symbols == null) {
+            throw new IllegalStateException(
+                    "ToolbarManager/coordinator symbols unavailable");
+        }
+
+        Class<?> type = manager.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(
+                        symbols.coordinatorFieldName);
+                field.setAccessible(true);
+                if (coordinator != null
+                        && !field.getType().isInstance(coordinator)) {
+                    throw new IllegalArgumentException(
+                            "Unexpected coordinator type "
+                                    + coordinator.getClass().getName());
+                }
+                field.set(manager, coordinator);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+
+        throw new NoSuchFieldException(
+                manager.getClass().getName() + "."
+                        + symbols.coordinatorFieldName);
+    }
+
+    private static Object allocateWithoutConstructor(Class<?> type)
+            throws Throwable {
+        Throwable firstFailure = null;
+
+        for (String unsafeName : new String[]{
+                "sun.misc.Unsafe",
+                "jdk.internal.misc.Unsafe"
+        }) {
+            try {
+                Class<?> unsafeClass = Class.forName(unsafeName);
+                Field field;
+                try {
+                    field = unsafeClass.getDeclaredField("theUnsafe");
+                } catch (NoSuchFieldException e) {
+                    field = unsafeClass.getDeclaredField("THE_ONE");
+                }
+                field.setAccessible(true);
+                Object unsafe = field.get(null);
+
+                Method allocateInstance = unsafeClass.getDeclaredMethod(
+                        "allocateInstance", Class.class);
+                allocateInstance.setAccessible(true);
+                return allocateInstance.invoke(
+                        unsafe, type);
+            } catch (Throwable t) {
+                if (firstFailure == null) {
+                    firstFailure = t;
+                }
+            }
+        }
+
+        throw new IllegalStateException(
+                "Unable to allocate " + type.getName()
+                        + " without constructor",
+                firstFailure);
+    }
+
     private static void installExtensionsMenuRepair(
             ClassLoader classLoader,
             ChromeDexResolver.Symbols symbols) {
@@ -975,6 +1405,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             findExtensionsCoordinator(manager);
                     if (coordinator == null) {
                         log("Extensions action: coordinator unavailable; "
+                                + "retrying Chrome Supplier path");
+                        if (repairCoordinatorFromChromeSupplier(
+                                activity, manager)) {
+                            coordinator =
+                                    findExtensionsCoordinator(manager);
+                        }
+                    }
+                    if (coordinator == null) {
+                        log("Extensions action: coordinator still unavailable; "
                                 + "suppressing unsafe action");
                         param.setResult(true);
                     }
