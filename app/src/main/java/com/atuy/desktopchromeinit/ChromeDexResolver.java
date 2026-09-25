@@ -31,6 +31,10 @@ import java.util.zip.ZipFile;
 final class ChromeDexResolver {
     private static final String CHROME_TABBED_ACTIVITY =
             "Lorg/chromium/chrome/browser/ChromeTabbedActivity;";
+    private static final String CHROME_ACTIVITY =
+            "Lorg/chromium/chrome/browser/app/ChromeActivity;";
+    private static final String CHROME_ANDROID_TASK_TRACE =
+            "ChromeActivity.initializeChromeAndroidTask";
     private static final String TOOLBAR_CONTROL_CONTAINER =
             "Lorg/chromium/chrome/browser/toolbar/top/ToolbarControlContainer;";
     private static final String WINDOW_ANDROID =
@@ -68,6 +72,9 @@ final class ChromeDexResolver {
         final String coordinatorClassName;
         final String toolbarManagerGetterOwnerClassName;
         final String toolbarManagerGetterMethodName;
+        final String taskInitializerOwnerClassName;
+        final String taskInitializerMethodName;
+        final String[] taskInitializerParameterDescriptors;
         final String menuHandlerMethodName;
         final String menuHandlerFourthParameterDescriptor;
 
@@ -81,6 +88,9 @@ final class ChromeDexResolver {
                 String coordinatorClassName,
                 String toolbarManagerGetterOwnerClassName,
                 String toolbarManagerGetterMethodName,
+                String taskInitializerOwnerClassName,
+                String taskInitializerMethodName,
+                String[] taskInitializerParameterDescriptors,
                 String menuHandlerMethodName,
                 String menuHandlerFourthParameterDescriptor) {
             this.toolbarManagerClassName = toolbarManagerClassName;
@@ -94,6 +104,12 @@ final class ChromeDexResolver {
                     toolbarManagerGetterOwnerClassName;
             this.toolbarManagerGetterMethodName =
                     toolbarManagerGetterMethodName;
+            this.taskInitializerOwnerClassName =
+                    taskInitializerOwnerClassName;
+            this.taskInitializerMethodName =
+                    taskInitializerMethodName;
+            this.taskInitializerParameterDescriptors =
+                    taskInitializerParameterDescriptors;
             this.menuHandlerMethodName = menuHandlerMethodName;
             this.menuHandlerFourthParameterDescriptor =
                     menuHandlerFourthParameterDescriptor;
@@ -107,6 +123,8 @@ final class ChromeDexResolver {
                     + "/" + coordinatorFieldName
                     + " getter=" + toolbarManagerGetterOwnerClassName
                     + "." + toolbarManagerGetterMethodName
+                    + " taskInit=" + taskInitializerOwnerClassName
+                    + "." + taskInitializerMethodName
                     + " menu=" + menuHandlerMethodName
                     + " tabletCast=" + supplierToolbarTabletClassName;
         }
@@ -222,6 +240,9 @@ final class ChromeDexResolver {
                 classOwners,
                 toolbar.ownerDescriptor);
 
+        MethodCandidate taskInitializer =
+                resolveChromeAndroidTaskInitializer(dexFiles);
+
         MenuCandidate menu = resolveMenuHandler(
                 dexFiles,
                 toolbar.ownerDescriptor,
@@ -244,6 +265,21 @@ final class ChromeDexResolver {
                         ? null
                         : descriptorToClassName(getter.ownerDescriptor),
                 getter == null ? null : getter.methodName,
+                taskInitializer == null
+                        ? null
+                        : descriptorToClassName(
+                                taskInitializer.ownerDescriptor),
+                taskInitializer == null
+                        ? null
+                        : taskInitializer.dex.methods[
+                                taskInitializer.methodIndex].name,
+                taskInitializer == null
+                        ? null
+                        : taskInitializer.dex.protos[
+                                taskInitializer.dex.methods[
+                                        taskInitializer.methodIndex]
+                                        .protoIndex]
+                                .parameterDescriptors.clone(),
                 menu.methodName,
                 menu.fourthParameterDescriptor);
     }
@@ -336,6 +372,104 @@ final class ChromeDexResolver {
         return best;
     }
 
+
+
+    /**
+     * Resolve ChromeActivity.initializeChromeAndroidTask() without depending
+     * on its R8 method name. Chromium 154 keeps the TraceEvent literal
+     * "ChromeActivity.initializeChromeAndroidTask" inside the method, which is
+     * a stronger anchor than the obfuscated name or surrounding field names.
+     */
+    private static MethodCandidate resolveChromeAndroidTaskInitializer(
+            List<DexFile> dexFiles) {
+        for (DexFile dex : dexFiles) {
+            ClassDef owner = dex.classes.get(CHROME_ACTIVITY);
+            if (owner == null) {
+                continue;
+            }
+
+            MethodCandidate signatureFallback = null;
+            for (MethodDef def : dex.getDefinedMethods(owner)) {
+                if ((def.accessFlags & ACC_STATIC) != 0
+                        || def.codeOffset == 0) {
+                    continue;
+                }
+                MethodId method = dex.methods[def.methodIndex];
+                Proto proto = dex.protos[method.protoIndex];
+                String[] p = proto.parameterDescriptors;
+                if (!VOID.equals(proto.returnDescriptor)
+                        || p.length != 4
+                        || !INT.equals(p[0])
+                        || !isObjectDescriptor(p[1])
+                        || !INT.equals(p[2])
+                        || !isObjectDescriptor(p[3])) {
+                    continue;
+                }
+
+                MethodCandidate candidate =
+                        new MethodCandidate(
+                                dex,
+                                def.methodIndex,
+                                CHROME_ACTIVITY,
+                                methodReferencesString(
+                                                dex,
+                                                def,
+                                                CHROME_ANDROID_TASK_TRACE)
+                                        ? 1000
+                                        : 1);
+                if (candidate.score == 1000) {
+                    return candidate;
+                }
+                if (signatureFallback == null) {
+                    signatureFallback = candidate;
+                } else {
+                    // Ambiguous without the TraceEvent anchor. Refuse to
+                    // guess rather than invoking the wrong ChromeActivity
+                    // lifecycle method.
+                    signatureFallback = null;
+                }
+            }
+            return signatureFallback;
+        }
+        return null;
+    }
+
+    private static boolean methodReferencesString(
+            DexFile dex,
+            MethodDef method,
+            String expected) {
+        if (method.codeOffset == 0) {
+            return false;
+        }
+
+        short[] insns = dex.readCodeUnits(method.codeOffset);
+        for (int i = 0; i < insns.length; i++) {
+            int opcode = insns[i] & 0xff;
+
+            // const-string vAA, string@BBBB
+            if (opcode == 0x1a && i + 1 < insns.length) {
+                int stringIndex = insns[i + 1] & 0xffff;
+                if (stringIndex >= 0
+                        && stringIndex < dex.strings.length
+                        && expected.equals(dex.strings[stringIndex])) {
+                    return true;
+                }
+            }
+
+            // const-string/jumbo vAA, string@BBBBBBBB
+            if (opcode == 0x1b && i + 2 < insns.length) {
+                int stringIndex =
+                        (insns[i + 1] & 0xffff)
+                                | ((insns[i + 2] & 0xffff) << 16);
+                if (stringIndex >= 0
+                        && stringIndex < dex.strings.length
+                        && expected.equals(dex.strings[stringIndex])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
     /**
      * Resolve ChromeActivity/ChromeTabbedActivity's exact no-arg ToolbarManager

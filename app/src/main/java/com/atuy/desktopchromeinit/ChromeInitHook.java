@@ -40,13 +40,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.5-source-exact";
+    private static final String BUILD_MARKER = "0.4.6-task-init";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
     private static volatile boolean extensionSupplierBridgeInstalled;
     private static volatile boolean toolbarInitializationHookInstalled;
     private static volatile boolean featureHooksInstalled;
+    private static volatile String lastRepairFailure = "repair not attempted";
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
@@ -384,6 +385,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                                 activity,
                                                                 manager);
                                             } catch (Throwable t) {
+                                                lastRepairFailure =
+                                                        "exception: "
+                                                        + stackSummary(t);
                                                 log("emergency coordinator "
                                                         + "repair failed: "
                                                         + stackSummary(t));
@@ -395,6 +399,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                         + "coordinator is still "
                                                         + "unavailable; "
                                                         + "suppressing action");
+                                                showRepairFailure(activity);
                                                 param.setResult(true);
                                             }
                                         }
@@ -1075,7 +1080,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      */
     private static boolean repairCoordinatorFromChromeSupplier(
             Activity activity, Object manager) throws Throwable {
+        lastRepairFailure = "repair started";
         if (activity == null || manager == null) {
+            lastRepairFailure = "Activity/ToolbarManager unavailable";
             return false;
         }
 
@@ -1087,12 +1094,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         ChromeDexResolver.Symbols symbols = resolvedSymbols;
         if (symbols == null) {
+            lastRepairFailure = "DEX symbols unavailable";
             log("source-exact repair: DEX symbols unavailable");
             return false;
         }
 
         ViewStub stub = ensureExtensionsStub(activity, manager);
         if (stub == null) {
+            lastRepairFailure = "Extensions ViewStub unavailable";
             log("source-exact repair: Extensions ViewStub unavailable");
             return false;
         }
@@ -1109,6 +1118,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         if (supplierClass == null
                 || coordinatorClass == null
                 || profileClass == null) {
+            lastRepairFailure = "required Chrome classes unavailable";
             log("source-exact repair: required Chrome classes unavailable");
             return false;
         }
@@ -1116,6 +1126,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         Object profile = findSupplierResultByType(
                 manager, profileClass);
         if (profile == null) {
+            lastRepairFailure = "Profile supplier unavailable";
             log("source-exact repair: Profile supplier is not ready");
             return false;
         }
@@ -1204,6 +1215,17 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 // The only remaining source capture is ChromeAndroidTask.
                 Object taskCandidate = findSupplierResultByType(
                         manager, fieldType);
+                if (taskCandidate == null) {
+                    // Chromium 154 changed initializeChromeAndroidTask() from
+                    // the old three-argument shape to
+                    // (int, TabModelSelector, int, MultiInstanceManager).
+                    // If startup left the OneshotSupplier empty, rerun Chrome's
+                    // own initializer resolved from its TraceEvent literal.
+                    retryChromeAndroidTaskInitialization(
+                            activity, manager);
+                    taskCandidate = findSupplierResultByType(
+                            manager, fieldType);
+                }
                 if (taskCandidate != null) {
                     value = taskCandidate;
                     chromeAndroidTask = taskCandidate;
@@ -1228,12 +1250,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         if (unresolved != 0) {
+            lastRepairFailure =
+                    "Supplier capture incomplete: "
+                            + assigned + "/" + (assigned + unresolved);
             log("source-exact repair: Supplier capture map incomplete; "
                     + "assigned=" + assigned
                     + " unresolved=" + unresolved);
             return false;
         }
         if (chromeAndroidTask == null) {
+            lastRepairFailure = "ChromeAndroidTask still unavailable";
             log("source-exact repair: ChromeAndroidTask supplier is still null");
             return false;
         }
@@ -1254,6 +1280,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         if (coordinator == null
                 || !coordinatorClass.isInstance(coordinator)) {
+            lastRepairFailure =
+                    "Extensions factory returned "
+                            + (coordinator == null
+                                ? "null"
+                                : coordinator.getClass().getName());
             log("source-exact repair: Chrome Supplier returned "
                     + (coordinator == null
                         ? "null"
@@ -1265,9 +1296,122 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         ACTIVE_COORDINATORS.put(activity, coordinator);
         scheduleRelocateExtensionsContainer(
                 activity, coordinator, 0);
+        lastRepairFailure = "none";
         log("source-exact repair: Extensions coordinator created through "
                 + symbols.extensionSupplierClassName + ".get()");
         return true;
+    }
+
+
+    /**
+     * Re-run Chromium's own ChromeAndroidTask initialization when the
+     * OneshotSupplier is unexpectedly still empty at the time the Extensions
+     * menu is used.
+     *
+     * The R8 method name is resolved by ChromeDexResolver from the stable
+     * TraceEvent literal inside ChromeActivity.initializeChromeAndroidTask().
+     */
+    private static boolean retryChromeAndroidTaskInitialization(
+            Activity activity, Object manager) {
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (activity == null
+                || manager == null
+                || symbols == null
+                || symbols.taskInitializerOwnerClassName == null
+                || symbols.taskInitializerMethodName == null
+                || symbols.taskInitializerParameterDescriptors == null) {
+            log("task-init retry: initializer symbols unavailable");
+            return false;
+        }
+
+        try {
+            Class<?>[] parameterTypes = classesForDescriptors(
+                    symbols.taskInitializerParameterDescriptors,
+                    chromeClassLoader);
+            if (parameterTypes.length != 4
+                    || parameterTypes[0] != int.class
+                    || parameterTypes[2] != int.class) {
+                log("task-init retry: unexpected initializer signature");
+                return false;
+            }
+
+            Object tabModelSelector =
+                    findDirectFieldValueByType(manager, parameterTypes[1]);
+            if (tabModelSelector == null) {
+                tabModelSelector =
+                        findDirectFieldValueByType(
+                                activity, parameterTypes[1]);
+            }
+            if (tabModelSelector == null) {
+                log("task-init retry: TabModelSelector unavailable");
+                return false;
+            }
+
+            // MultiInstanceManager is @Nullable in Chromium's source.
+            Object multiInstanceManager =
+                    findDirectFieldValueByType(
+                            activity, parameterTypes[3]);
+
+            int supportedProfileType =
+                    readSupportedProfileType(activity);
+
+            Class<?> owner = XposedHelpers.findClass(
+                    symbols.taskInitializerOwnerClassName,
+                    chromeClassLoader);
+            Method method = owner.getDeclaredMethod(
+                    symbols.taskInitializerMethodName,
+                    parameterTypes);
+            method.setAccessible(true);
+
+            // BrowserWindowType.NORMAL is the value used by
+            // ChromeTabbedActivity.initializeCompositor().
+            method.invoke(
+                    activity,
+                    0,
+                    tabModelSelector,
+                    supportedProfileType,
+                    multiInstanceManager);
+
+            log("task-init retry: invoked "
+                    + symbols.taskInitializerOwnerClassName
+                    + "." + symbols.taskInitializerMethodName
+                    + "(NORMAL, TabModelSelector, "
+                    + supportedProfileType + ", MultiInstanceManager)");
+            return true;
+        } catch (Throwable t) {
+            Throwable actual = t;
+            if (t instanceof java.lang.reflect.InvocationTargetException
+                    && ((java.lang.reflect.InvocationTargetException) t)
+                            .getCause() != null) {
+                actual =
+                        ((java.lang.reflect.InvocationTargetException) t)
+                                .getCause();
+            }
+            lastRepairFailure =
+                    "task-init failed: " + stackSummary(actual);
+            log("task-init retry failed: "
+                    + stackSummary(actual));
+            return false;
+        }
+    }
+
+    private static int readSupportedProfileType(Activity activity) {
+        // ChromeTabbedActivity exposes this as a public override in Chromium
+        // 154. Use it when R8 preserves the public method name.
+        try {
+            Method getter =
+                    activity.getClass().getMethod(
+                            "getSupportedProfileType");
+            Object value = getter.invoke(activity);
+            if (value instanceof Integer) {
+                return (Integer) value;
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // Standard ChromeTabbedActivity supports regular + OTR profiles.
+        // SupportedProfileType.MIXED == 3 in Chromium 154.
+        return 3;
     }
 
     /**
@@ -2852,6 +2996,24 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     + stackSummary(t));
         }
         return null;
+    }
+
+    private static void showRepairFailure(Activity activity) {
+        if (activity == null
+                || activity.isFinishing()
+                || activity.isDestroyed()) {
+            return;
+        }
+        try {
+            String detail = lastRepairFailure;
+            activity.runOnUiThread(() ->
+                    android.widget.Toast.makeText(
+                            activity,
+                            "DesktopChromeInit: " + detail,
+                            android.widget.Toast.LENGTH_LONG)
+                            .show());
+        } catch (Throwable ignored) {
+        }
     }
 
     private static String stackSummary(Throwable t) {
