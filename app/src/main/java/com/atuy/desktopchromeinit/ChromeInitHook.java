@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.5-source-exact";
+    private static final String BUILD_MARKER = "0.4.6-task-init";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -1204,6 +1204,17 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 // The only remaining source capture is ChromeAndroidTask.
                 Object taskCandidate = findSupplierResultByType(
                         manager, fieldType);
+                if (taskCandidate == null) {
+                    // Chromium 154 changed initializeChromeAndroidTask() from
+                    // the old three-argument shape to
+                    // (int, TabModelSelector, int, MultiInstanceManager).
+                    // If startup left the OneshotSupplier empty, rerun Chrome's
+                    // own initializer resolved from its TraceEvent literal.
+                    retryChromeAndroidTaskInitialization(
+                            activity, manager);
+                    taskCandidate = findSupplierResultByType(
+                            manager, fieldType);
+                }
                 if (taskCandidate != null) {
                     value = taskCandidate;
                     chromeAndroidTask = taskCandidate;
@@ -1268,6 +1279,116 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         log("source-exact repair: Extensions coordinator created through "
                 + symbols.extensionSupplierClassName + ".get()");
         return true;
+    }
+
+
+    /**
+     * Re-run Chromium's own ChromeAndroidTask initialization when the
+     * OneshotSupplier is unexpectedly still empty at the time the Extensions
+     * menu is used.
+     *
+     * The R8 method name is resolved by ChromeDexResolver from the stable
+     * TraceEvent literal inside ChromeActivity.initializeChromeAndroidTask().
+     */
+    private static boolean retryChromeAndroidTaskInitialization(
+            Activity activity, Object manager) {
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (activity == null
+                || manager == null
+                || symbols == null
+                || symbols.taskInitializerOwnerClassName == null
+                || symbols.taskInitializerMethodName == null
+                || symbols.taskInitializerParameterDescriptors == null) {
+            log("task-init retry: initializer symbols unavailable");
+            return false;
+        }
+
+        try {
+            Class<?>[] parameterTypes = classesForDescriptors(
+                    symbols.taskInitializerParameterDescriptors,
+                    chromeClassLoader);
+            if (parameterTypes.length != 4
+                    || parameterTypes[0] != int.class
+                    || parameterTypes[2] != int.class) {
+                log("task-init retry: unexpected initializer signature");
+                return false;
+            }
+
+            Object tabModelSelector =
+                    findDirectFieldValueByType(manager, parameterTypes[1]);
+            if (tabModelSelector == null) {
+                tabModelSelector =
+                        findDirectFieldValueByType(
+                                activity, parameterTypes[1]);
+            }
+            if (tabModelSelector == null) {
+                log("task-init retry: TabModelSelector unavailable");
+                return false;
+            }
+
+            // MultiInstanceManager is @Nullable in Chromium's source.
+            Object multiInstanceManager =
+                    findDirectFieldValueByType(
+                            activity, parameterTypes[3]);
+
+            int supportedProfileType =
+                    readSupportedProfileType(activity);
+
+            Class<?> owner = XposedHelpers.findClass(
+                    symbols.taskInitializerOwnerClassName,
+                    chromeClassLoader);
+            Method method = owner.getDeclaredMethod(
+                    symbols.taskInitializerMethodName,
+                    parameterTypes);
+            method.setAccessible(true);
+
+            // BrowserWindowType.NORMAL is the value used by
+            // ChromeTabbedActivity.initializeCompositor().
+            method.invoke(
+                    activity,
+                    0,
+                    tabModelSelector,
+                    supportedProfileType,
+                    multiInstanceManager);
+
+            log("task-init retry: invoked "
+                    + symbols.taskInitializerOwnerClassName
+                    + "." + symbols.taskInitializerMethodName
+                    + "(NORMAL, TabModelSelector, "
+                    + supportedProfileType + ", MultiInstanceManager)");
+            return true;
+        } catch (Throwable t) {
+            Throwable actual = t;
+            if (t instanceof java.lang.reflect.InvocationTargetException
+                    && ((java.lang.reflect.InvocationTargetException) t)
+                            .getCause() != null) {
+                actual =
+                        ((java.lang.reflect.InvocationTargetException) t)
+                                .getCause();
+            }
+            log("task-init retry failed: "
+                    + stackSummary(actual));
+            return false;
+        }
+    }
+
+    private static int readSupportedProfileType(Activity activity) {
+        // ChromeTabbedActivity exposes this as a public override in Chromium
+        // 154. Use it when R8 preserves the public method name.
+        try {
+            Method getter =
+                    activity.getClass().getMethod(
+                            "getSupportedProfileType");
+            Object value = getter.invoke(activity);
+            if (value instanceof Integer) {
+                return (Integer) value;
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // Standard ChromeTabbedActivity supports regular + OTR profiles.
+        // SupportedProfileType.MIXED == 3 in Chromium 154.
+        return 3;
     }
 
     /**
