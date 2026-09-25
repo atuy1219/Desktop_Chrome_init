@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     # Pin the image so the ubuntu-latest -> Ubuntu 26 migration does not
@@ -66,3 +69,31 @@ jobs:
           name: DesktopChromeInit-release
           path: app/build/outputs/DesktopChromeInit-release.apk
           if-no-files-found: error
+
+      - name: Publish direct APK release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          if [ -z "$VERSION" ]; then
+            echo "Could not resolve versionName from app/build.gradle.kts"
+            exit 1
+          fi
+
+          TAG="v$VERSION"
+          APK="app/build/outputs/DesktopChromeInit-$VERSION.apk"
+          cp app/build/outputs/DesktopChromeInit-release.apk "$APK"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --target "$GITHUB_SHA" \
+              --title "DesktopChromeInit $VERSION" \
+              --notes "Signed release APK built from main."
+          fi
+
+          echo "Published direct APK: $APK"
