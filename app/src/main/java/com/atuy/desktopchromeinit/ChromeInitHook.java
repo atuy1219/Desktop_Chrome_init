@@ -47,6 +47,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile boolean extensionSupplierBridgeInstalled;
     private static volatile boolean toolbarInitializationHookInstalled;
     private static volatile boolean featureHooksInstalled;
+    private static volatile String lastRepairFailure = "repair not attempted";
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
             new ThreadLocal<>();
@@ -384,6 +385,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                                 activity,
                                                                 manager);
                                             } catch (Throwable t) {
+                                                lastRepairFailure =
+                                                        "exception: "
+                                                        + stackSummary(t);
                                                 log("emergency coordinator "
                                                         + "repair failed: "
                                                         + stackSummary(t));
@@ -395,6 +399,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                         + "coordinator is still "
                                                         + "unavailable; "
                                                         + "suppressing action");
+                                                showRepairFailure(activity);
                                                 param.setResult(true);
                                             }
                                         }
@@ -1075,7 +1080,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      */
     private static boolean repairCoordinatorFromChromeSupplier(
             Activity activity, Object manager) throws Throwable {
+        lastRepairFailure = "repair started";
         if (activity == null || manager == null) {
+            lastRepairFailure = "Activity/ToolbarManager unavailable";
             return false;
         }
 
@@ -1087,12 +1094,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         ChromeDexResolver.Symbols symbols = resolvedSymbols;
         if (symbols == null) {
+            lastRepairFailure = "DEX symbols unavailable";
             log("source-exact repair: DEX symbols unavailable");
             return false;
         }
 
         ViewStub stub = ensureExtensionsStub(activity, manager);
         if (stub == null) {
+            lastRepairFailure = "Extensions ViewStub unavailable";
             log("source-exact repair: Extensions ViewStub unavailable");
             return false;
         }
@@ -1109,6 +1118,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         if (supplierClass == null
                 || coordinatorClass == null
                 || profileClass == null) {
+            lastRepairFailure = "required Chrome classes unavailable";
             log("source-exact repair: required Chrome classes unavailable");
             return false;
         }
@@ -1116,6 +1126,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         Object profile = findSupplierResultByType(
                 manager, profileClass);
         if (profile == null) {
+            lastRepairFailure = "Profile supplier unavailable";
             log("source-exact repair: Profile supplier is not ready");
             return false;
         }
@@ -1239,12 +1250,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         if (unresolved != 0) {
+            lastRepairFailure =
+                    "Supplier capture incomplete: "
+                            + assigned + "/" + (assigned + unresolved);
             log("source-exact repair: Supplier capture map incomplete; "
                     + "assigned=" + assigned
                     + " unresolved=" + unresolved);
             return false;
         }
         if (chromeAndroidTask == null) {
+            lastRepairFailure = "ChromeAndroidTask still unavailable";
             log("source-exact repair: ChromeAndroidTask supplier is still null");
             return false;
         }
@@ -1265,6 +1280,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         if (coordinator == null
                 || !coordinatorClass.isInstance(coordinator)) {
+            lastRepairFailure =
+                    "Extensions factory returned "
+                            + (coordinator == null
+                                ? "null"
+                                : coordinator.getClass().getName());
             log("source-exact repair: Chrome Supplier returned "
                     + (coordinator == null
                         ? "null"
@@ -1276,6 +1296,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         ACTIVE_COORDINATORS.put(activity, coordinator);
         scheduleRelocateExtensionsContainer(
                 activity, coordinator, 0);
+        lastRepairFailure = "none";
         log("source-exact repair: Extensions coordinator created through "
                 + symbols.extensionSupplierClassName + ".get()");
         return true;
@@ -1366,6 +1387,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         ((java.lang.reflect.InvocationTargetException) t)
                                 .getCause();
             }
+            lastRepairFailure =
+                    "task-init failed: " + stackSummary(actual);
             log("task-init retry failed: "
                     + stackSummary(actual));
             return false;
@@ -2973,6 +2996,24 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     + stackSummary(t));
         }
         return null;
+    }
+
+    private static void showRepairFailure(Activity activity) {
+        if (activity == null
+                || activity.isFinishing()
+                || activity.isDestroyed()) {
+            return;
+        }
+        try {
+            String detail = lastRepairFailure;
+            activity.runOnUiThread(() ->
+                    android.widget.Toast.makeText(
+                            activity,
+                            "DesktopChromeInit: " + detail,
+                            android.widget.Toast.LENGTH_LONG)
+                            .show());
+        } catch (Throwable ignored) {
+        }
     }
 
     private static String stackSummary(Throwable t) {
