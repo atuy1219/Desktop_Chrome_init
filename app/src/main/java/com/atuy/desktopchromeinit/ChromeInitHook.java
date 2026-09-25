@@ -40,10 +40,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.2-api102-generic";
+    private static final String BUILD_MARKER = "0.4.4-api102-full-retry";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
+    private static volatile boolean extensionSupplierBridgeInstalled;
+    private static volatile boolean toolbarInitializationHookInstalled;
     private static volatile boolean featureHooksInstalled;
 
     private static final ThreadLocal<Boolean> EXTENSIONS_ACTION =
@@ -78,6 +80,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     public static boolean isExtensionsMenuGuardInstalled() {
         return emergencyMenuGuardInstalled;
+    }
+
+    public static boolean isFullFeatureHooksInstalled() {
+        return featureHooksInstalled
+                && extensionSupplierBridgeInstalled
+                && toolbarInitializationHookInstalled;
     }
 
     private static final class ToolbarSwap {
@@ -270,6 +278,20 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     classLoader, symbols);
             installToolbarInitializationHook(
                     classLoader, symbols);
+
+            boolean coreInstalled =
+                    extensionSupplierBridgeInstalled
+                    && toolbarInitializationHookInstalled;
+            if (!coreInstalled) {
+                log(origin + ": core Chrome feature hooks incomplete; "
+                        + "supplierBridge="
+                        + extensionSupplierBridgeInstalled
+                        + " toolbarInit="
+                        + toolbarInitializationHookInstalled
+                        + "; retry remains enabled");
+                return;
+            }
+
             installExtensionPopupWidthBridge(classLoader);
             installExtensionPopupDismissCleanup(classLoader);
 
@@ -473,7 +495,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static void installExtensionSupplierToolbarBridge(
             ClassLoader classLoader,
             ChromeDexResolver.Symbols symbols) {
+        if (extensionSupplierBridgeInstalled) {
+            return;
+        }
         if (symbols.supplierToolbarTabletClassName == null) {
+            extensionSupplierBridgeInstalled = true;
             log("Extensions Supplier has no ToolbarTablet cast; bridge not needed");
             return;
         }
@@ -576,6 +602,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 }
             });
 
+            extensionSupplierBridgeInstalled = true;
             log("installed structural Extensions Supplier bridge on "
                     + symbols.extensionSupplierClassName + ".get()");
         } catch (Throwable t) {
@@ -719,6 +746,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static void installToolbarInitializationHook(
             ClassLoader classLoader,
             ChromeDexResolver.Symbols symbols) {
+        if (toolbarInitializationHookInstalled) {
+            return;
+        }
         try {
             Class<?> managerClass = XposedHelpers.findClass(
                     symbols.toolbarManagerClassName, classLoader);
@@ -800,6 +830,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 }
             });
 
+            toolbarInitializationHookInstalled = true;
             log("installed structural ToolbarManager initializer hook on "
                     + symbols.toolbarManagerClassName + "."
                     + symbols.initializeMethodName);

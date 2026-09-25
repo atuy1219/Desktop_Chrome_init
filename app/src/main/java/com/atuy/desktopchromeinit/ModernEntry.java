@@ -31,6 +31,7 @@ public final class ModernEntry extends XposedModule {
 
     private volatile String processName;
     private volatile ClassLoader latestClassLoader;
+    private volatile ApplicationInfo latestApplicationInfo;
     private volatile boolean installed;
     private volatile boolean retryScheduled;
     private int retryCount;
@@ -38,8 +39,9 @@ public final class ModernEntry extends XposedModule {
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
         processName = param.getProcessName();
+        Log.e(TAG, "BOOT onModuleLoaded process=" + processName);
         XposedBridge.attach(this);
-        d("onModuleLoaded process=" + processName
+        e("onModuleLoaded process=" + processName
                 + " api=" + getApiVersion());
 
         if (TARGET_PACKAGE.equals(processName)) {
@@ -54,7 +56,9 @@ public final class ModernEntry extends XposedModule {
         }
 
         latestClassLoader = param.getDefaultClassLoader();
-        d("onPackageLoaded loader=" + latestClassLoader);
+        latestApplicationInfo = param.getApplicationInfo();
+        e("onPackageLoaded loader=" + latestClassLoader
+                + " appInfo=" + (latestApplicationInfo != null));
         tryInstall("onPackageLoaded");
     }
 
@@ -65,7 +69,9 @@ public final class ModernEntry extends XposedModule {
         }
 
         latestClassLoader = param.getClassLoader();
-        d("onPackageReady loader=" + latestClassLoader);
+        latestApplicationInfo = param.getApplicationInfo();
+        e("onPackageReady loader=" + latestClassLoader
+                + " appInfo=" + (latestApplicationInfo != null));
         tryInstall("onPackageReady");
     }
 
@@ -93,7 +99,7 @@ public final class ModernEntry extends XposedModule {
             if (!installed && retryCount < MAX_RETRY_COUNT) {
                 scheduleRetry(RETRY_INTERVAL_MS);
             } else if (!installed) {
-                d("gave up installing Chrome hooks after "
+                e("gave up installing full Chrome hooks after "
                         + retryCount + " retries");
             }
         }, delayMs);
@@ -114,13 +120,17 @@ public final class ModernEntry extends XposedModule {
         }
 
         Application app = currentApplication();
+        ApplicationInfo appInfo = latestApplicationInfo;
+        if (appInfo == null && app != null) {
+            appInfo = app.getApplicationInfo();
+        }
 
         XC_LoadPackage.LoadPackageParam compat =
                 new XC_LoadPackage.LoadPackageParam();
         compat.packageName = TARGET_PACKAGE;
         compat.processName = processName;
         compat.classLoader = loader;
-        compat.appInfo = app != null ? app.getApplicationInfo() : null;
+        compat.appInfo = appInfo;
 
         try {
             d(phase + ": attempting generic hook install"
@@ -128,12 +138,21 @@ public final class ModernEntry extends XposedModule {
                     + " appInfo=" + (compat.appInfo != null));
             new ChromeInitHook().handleLoadPackage(compat);
 
-            if (ChromeInitHook.isExtensionsMenuGuardInstalled()) {
+            boolean guard =
+                    ChromeInitHook.isExtensionsMenuGuardInstalled();
+            boolean full =
+                    ChromeInitHook.isFullFeatureHooksInstalled();
+
+            if (full) {
                 installed = true;
                 latestClassLoader = loader;
-                d(phase + ": generic Extensions crash guard confirmed");
+                e(phase + ": full generic Chrome hooks confirmed"
+                        + " guard=" + guard);
             } else {
-                d(phase + ": crash guard not installed yet; retrying");
+                e(phase + ": hook install incomplete"
+                        + " guard=" + guard
+                        + " full=" + full
+                        + "; retrying");
                 scheduleRetry(RETRY_INTERVAL_MS);
             }
         } catch (Throwable t) {
@@ -203,6 +222,14 @@ public final class ModernEntry extends XposedModule {
         Log.i(TAG, message);
         try {
             log(Log.INFO, TAG, message);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void e(String message) {
+        Log.e(TAG, message);
+        try {
+            log(Log.ERROR, TAG, message);
         } catch (Throwable ignored) {
         }
     }
