@@ -1114,7 +1114,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         Object profile = findSupplierResultByType(
-                manager, profileClass, false);
+                manager, profileClass);
         if (profile == null) {
             log("source-exact repair: Profile supplier is not ready");
             return false;
@@ -1203,7 +1203,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             } else {
                 // The only remaining source capture is ChromeAndroidTask.
                 Object taskCandidate = findSupplierResultByType(
-                        manager, fieldType, false);
+                        manager, fieldType);
                 if (taskCandidate != null) {
                     value = taskCandidate;
                     chromeAndroidTask = taskCandidate;
@@ -1277,8 +1277,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      */
     private static Object findSupplierResultByType(
             Object manager,
-            Class<?> targetType,
-            boolean requireFactoryShape) {
+            Class<?> targetType) {
         if (manager == null || targetType == null) {
             return null;
         }
@@ -1307,10 +1306,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 ((java.util.function.Supplier<?>) supplier)
                                         .get();
                         if (value != null
-                                && targetType.isInstance(value)
-                                && (!requireFactoryShape
-                                    || hasExtensionFactoryShape(
-                                            value.getClass()))) {
+                                && targetType.isInstance(value)) {
                             return value;
                         }
                     } catch (Throwable ignored) {
