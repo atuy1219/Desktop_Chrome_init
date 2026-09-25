@@ -66,6 +66,8 @@ final class ChromeDexResolver {
         final String supplierToolbarTabletClassName;
         final String coordinatorFieldName;
         final String coordinatorClassName;
+        final String toolbarManagerGetterOwnerClassName;
+        final String toolbarManagerGetterMethodName;
         final String menuHandlerMethodName;
         final String menuHandlerFourthParameterDescriptor;
 
@@ -77,6 +79,8 @@ final class ChromeDexResolver {
                 String supplierToolbarTabletClassName,
                 String coordinatorFieldName,
                 String coordinatorClassName,
+                String toolbarManagerGetterOwnerClassName,
+                String toolbarManagerGetterMethodName,
                 String menuHandlerMethodName,
                 String menuHandlerFourthParameterDescriptor) {
             this.toolbarManagerClassName = toolbarManagerClassName;
@@ -86,6 +90,10 @@ final class ChromeDexResolver {
             this.supplierToolbarTabletClassName = supplierToolbarTabletClassName;
             this.coordinatorFieldName = coordinatorFieldName;
             this.coordinatorClassName = coordinatorClassName;
+            this.toolbarManagerGetterOwnerClassName =
+                    toolbarManagerGetterOwnerClassName;
+            this.toolbarManagerGetterMethodName =
+                    toolbarManagerGetterMethodName;
             this.menuHandlerMethodName = menuHandlerMethodName;
             this.menuHandlerFourthParameterDescriptor =
                     menuHandlerFourthParameterDescriptor;
@@ -97,6 +105,8 @@ final class ChromeDexResolver {
                     + " supplier=" + extensionSupplierClassName
                     + " coordinator=" + coordinatorClassName
                     + "/" + coordinatorFieldName
+                    + " getter=" + toolbarManagerGetterOwnerClassName
+                    + "." + toolbarManagerGetterMethodName
                     + " menu=" + menuHandlerMethodName
                     + " tabletCast=" + supplierToolbarTabletClassName;
         }
@@ -208,6 +218,10 @@ final class ChromeDexResolver {
                 toolbar.ownerDescriptor,
                 classOwners);
 
+        GetterCandidate getter = resolveToolbarManagerGetter(
+                classOwners,
+                toolbar.ownerDescriptor);
+
         MenuCandidate menu = resolveMenuHandler(
                 dexFiles,
                 toolbar.ownerDescriptor,
@@ -226,6 +240,10 @@ final class ChromeDexResolver {
                         : descriptorToClassName(supplier.toolbarTabletCastDescriptor),
                 coordinatorField.name,
                 descriptorToClassName(coordinatorField.typeDescriptor),
+                getter == null
+                        ? null
+                        : descriptorToClassName(getter.ownerDescriptor),
+                getter == null ? null : getter.methodName,
                 menu.methodName,
                 menu.fourthParameterDescriptor);
     }
@@ -316,6 +334,57 @@ final class ChromeDexResolver {
                             + second.ownerDescriptor + " score=" + best.score);
         }
         return best;
+    }
+
+
+    /**
+     * Resolve ChromeActivity/ChromeTabbedActivity's exact no-arg ToolbarManager
+     * getter from the DEX return type. Chromium source calls getToolbarManager()
+     * from the app-menu path, but R8 renames it (for example P2() on older
+     * builds). Returning the owner as well avoids reflective method
+     * enumeration, which can resolve desktop-only Android framework types.
+     */
+    private static GetterCandidate resolveToolbarManagerGetter(
+            Map<String, DexFile> classOwners,
+            String toolbarManagerDescriptor) {
+        String descriptor = CHROME_TABBED_ACTIVITY;
+        HashSet<String> visited = new HashSet<>();
+
+        while (descriptor != null && visited.add(descriptor)) {
+            DexFile dex = classOwners.get(descriptor);
+            if (dex == null) {
+                break;
+            }
+            ClassDef def = dex.classes.get(descriptor);
+            if (def == null) {
+                break;
+            }
+
+            GetterCandidate found = null;
+            for (MethodDef methodDef : dex.getDefinedMethods(def)) {
+                if ((methodDef.accessFlags & ACC_STATIC) != 0) {
+                    continue;
+                }
+                MethodId method = dex.methods[methodDef.methodIndex];
+                Proto proto = dex.protos[method.protoIndex];
+                if (proto.parameterDescriptors.length == 0
+                        && toolbarManagerDescriptor.equals(
+                                proto.returnDescriptor)) {
+                    if (found != null
+                            && !found.methodName.equals(method.name)) {
+                        return null;
+                    }
+                    found = new GetterCandidate(
+                            descriptor, method.name);
+                }
+            }
+
+            if (found != null) {
+                return found;
+            }
+            descriptor = def.superDescriptor;
+        }
+        return null;
     }
 
     private static FieldId resolveCoordinatorField(
@@ -798,6 +867,18 @@ final class ChromeDexResolver {
             this.classDescriptor = classDescriptor;
             this.score = score;
             this.toolbarTabletCastDescriptor = toolbarTabletCastDescriptor;
+        }
+    }
+
+    private static final class GetterCandidate {
+        final String ownerDescriptor;
+        final String methodName;
+
+        GetterCandidate(
+                String ownerDescriptor,
+                String methodName) {
+            this.ownerDescriptor = ownerDescriptor;
+            this.methodName = methodName;
         }
     }
 

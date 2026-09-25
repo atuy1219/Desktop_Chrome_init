@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.4-api102-full-retry";
+    private static final String BUILD_MARKER = "0.4.5-source-exact";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -367,7 +367,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                         // original run and catch only its NPE
                                         // in afterHookedMethod().
                                         Object manager =
-                                                ACTIVE_TOOLBAR_MANAGERS.get(
+                                                resolveToolbarManagerForActivity(
                                                         activity);
                                         if (manager != null
                                                 && resolvedSymbols != null
@@ -840,6 +840,65 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
     }
 
+
+    /**
+     * Chromium's app-menu path calls ChromeActivity.getToolbarManager().
+     * R8 renames that getter, so ChromeDexResolver resolves the exact no-arg
+     * method by its ToolbarManager return descriptor. This lets a menu click
+     * recover the live manager even if initializeWithNative() ran before our
+     * initializer hook captured it.
+     */
+    private static Object resolveToolbarManagerForActivity(
+            Activity activity) {
+        if (activity == null) {
+            return null;
+        }
+
+        Object cached = ACTIVE_TOOLBAR_MANAGERS.get(activity);
+        if (cached != null
+                && (toolbarManagerClass == null
+                    || toolbarManagerClass.isInstance(cached))) {
+            return cached;
+        }
+
+        ChromeDexResolver.Symbols symbols = resolvedSymbols;
+        if (symbols == null
+                || symbols.toolbarManagerGetterOwnerClassName == null
+                || symbols.toolbarManagerGetterMethodName == null) {
+            return null;
+        }
+
+        try {
+            Class<?> managerClass = toolbarManagerClass;
+            if (managerClass == null) {
+                managerClass = XposedHelpers.findClass(
+                        symbols.toolbarManagerClassName,
+                        chromeClassLoader);
+                toolbarManagerClass = managerClass;
+            }
+
+            Class<?> owner = XposedHelpers.findClass(
+                    symbols.toolbarManagerGetterOwnerClassName,
+                    chromeClassLoader);
+            Method getter = owner.getDeclaredMethod(
+                    symbols.toolbarManagerGetterMethodName);
+            getter.setAccessible(true);
+            Object manager = getter.invoke(activity);
+            if (manager != null && managerClass.isInstance(manager)) {
+                ACTIVE_TOOLBAR_MANAGERS.put(activity, manager);
+                log("recovered active ToolbarManager through "
+                        + symbols.toolbarManagerGetterOwnerClassName
+                        + "." + symbols.toolbarManagerGetterMethodName
+                        + "()");
+                return manager;
+            }
+        } catch (Throwable t) {
+            log("ToolbarManager getter recovery failed: "
+                    + stackSummary(t));
+        }
+        return null;
+    }
+
     private static Activity resolveToolbarManagerActivity(Object manager) {
         View toolbar = findToolbarView(manager);
         if (toolbar != null) {
@@ -996,6 +1055,24 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      * returned null. The synthetic Supplier class itself is resolved from DEX;
      * none of its R8 field names are assumed here.
      */
+    /**
+     * Reconstruct the exact Supplier lambda used by Chromium 154
+     * ToolbarManager.initializeWithNative().
+     *
+     * Chromium source (154.0.8037.57) captures only:
+     *   ToolbarManager this
+     *   ViewStub extensionsToolbarStub
+     *   ChromeAndroidTask task
+     *   Profile tabModelProfile
+     *   ContextMenuPopulatorFactory contextMenuPopulatorFactory
+     *   SelectionDropdownMenuDelegate selectionDropdownMenuDelegate
+     *   Runnable cleanup
+     *
+     * The previous implementation incorrectly searched for a separate
+     * "Extensions support factory" capture. No such captured object exists in
+     * this lambda. Capture matching below therefore follows the source shape
+     * exactly and uses runtime/DEX types rather than R8 field names.
+     */
     private static boolean repairCoordinatorFromChromeSupplier(
             Activity activity, Object manager) throws Throwable {
         if (activity == null || manager == null) {
@@ -1010,19 +1087,13 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         ChromeDexResolver.Symbols symbols = resolvedSymbols;
         if (symbols == null) {
-            log("deferred repair: DEX symbols unavailable");
-            return false;
-        }
-
-        Object[] initializeArgs = INITIALIZE_ARGUMENTS.get(manager);
-        if (initializeArgs == null) {
-            log("deferred repair: initializeWithNative arguments unavailable");
+            log("source-exact repair: DEX symbols unavailable");
             return false;
         }
 
         ViewStub stub = ensureExtensionsStub(activity, manager);
         if (stub == null) {
-            log("deferred repair: Extensions ViewStub unavailable");
+            log("source-exact repair: Extensions ViewStub unavailable");
             return false;
         }
 
@@ -1038,24 +1109,36 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         if (supplierClass == null
                 || coordinatorClass == null
                 || profileClass == null) {
-            log("deferred repair: required Chrome classes unavailable");
+            log("source-exact repair: required Chrome classes unavailable");
             return false;
         }
 
         Object profile = findSupplierResultByType(
-                manager, profileClass, false);
+                manager, profileClass);
         if (profile == null) {
-            log("deferred repair: Profile Supplier is not ready");
+            log("source-exact repair: Profile supplier is not ready");
             return false;
         }
 
-        Object extensionFactory =
-                findExtensionFactorySupplierResult(
-                        manager, supplierClass);
-        if (extensionFactory == null) {
-            log("deferred repair: Extensions support Supplier is still null");
-            return false;
-        }
+        Object[] initializeArgs = INITIALIZE_ARGUMENTS.get(manager);
+        Class<?>[] initializeTypes = classesForDescriptors(
+                symbols.initializeParameterDescriptors,
+                chromeClassLoader);
+
+        // In Chromium 154 these are the final two initializeWithNative()
+        // parameters and both are nullable. Their declared parameter types are
+        // still usable to identify the corresponding R8 lambda fields even
+        // when the runtime values are null.
+        Object contextMenuFactory =
+                initializeArgs != null && initializeArgs.length > 8
+                        ? initializeArgs[8] : null;
+        Object selectionDelegate =
+                initializeArgs != null && initializeArgs.length > 9
+                        ? initializeArgs[9] : null;
+        Class<?> contextMenuType =
+                initializeTypes.length > 8 ? initializeTypes[8] : null;
+        Class<?> selectionType =
+                initializeTypes.length > 9 ? initializeTypes[9] : null;
 
         Object syntheticSupplier =
                 allocateWithoutConstructor(supplierClass);
@@ -1063,8 +1146,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         final Object managerForCleanup = manager;
         Runnable cleanup = () -> {
             try {
-                setResolvedCoordinatorField(
-                        managerForCleanup, null);
+                setResolvedCoordinatorField(managerForCleanup, null);
             } catch (Throwable t) {
                 log("Extensions cleanup callback failed: "
                         + stackSummary(t));
@@ -1073,6 +1155,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         int assigned = 0;
         int unresolved = 0;
+        Object chromeAndroidTask = null;
+
         for (Field field : supplierClass.getDeclaredFields()) {
             if (java.lang.reflect.Modifier.isStatic(
                     field.getModifiers())
@@ -1083,41 +1167,74 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             field.setAccessible(true);
             Class<?> fieldType = field.getType();
             Object value = null;
+            boolean resolved = false;
+            String semantic = null;
 
             if (fieldType.isInstance(manager)) {
                 value = manager;
-            } else if (fieldType.isInstance(stub)) {
+                resolved = true;
+                semantic = "ToolbarManager";
+            } else if (fieldType.isAssignableFrom(stub.getClass())) {
                 value = stub;
-            } else if (fieldType.isInstance(extensionFactory)) {
-                value = extensionFactory;
+                resolved = true;
+                semantic = "ViewStub";
             } else if (fieldType.isInstance(profile)) {
                 value = profile;
+                resolved = true;
+                semantic = "Profile";
             } else if (Runnable.class.isAssignableFrom(fieldType)) {
                 value = cleanup;
+                resolved = true;
+                semantic = "cleanup Runnable";
+            } else if (contextMenuType != null
+                    && (fieldType.equals(contextMenuType)
+                        || fieldType.isAssignableFrom(contextMenuType)
+                        || contextMenuType.isAssignableFrom(fieldType))) {
+                value = contextMenuFactory;
+                resolved = true;
+                semantic = "ContextMenuPopulatorFactory";
+            } else if (selectionType != null
+                    && (fieldType.equals(selectionType)
+                        || fieldType.isAssignableFrom(selectionType)
+                        || selectionType.isAssignableFrom(fieldType))) {
+                value = selectionDelegate;
+                resolved = true;
+                semantic = "SelectionDropdownMenuDelegate";
             } else {
-                value = findMatchingInitializeArgument(
-                        fieldType, initializeArgs);
-                if (value == null) {
-                    value = findDirectFieldValueByType(
-                            manager, fieldType);
+                // The only remaining source capture is ChromeAndroidTask.
+                Object taskCandidate = findSupplierResultByType(
+                        manager, fieldType);
+                if (taskCandidate != null) {
+                    value = taskCandidate;
+                    chromeAndroidTask = taskCandidate;
+                    resolved = true;
+                    semantic = "ChromeAndroidTask";
                 }
             }
 
-            if (value == null) {
+            if (!resolved) {
                 unresolved++;
-                log("deferred repair: unresolved Supplier capture "
+                log("source-exact repair: unmatched Supplier capture "
+                        + field.getName() + ":"
                         + fieldType.getName());
                 continue;
             }
 
             field.set(syntheticSupplier, value);
             assigned++;
+            log("source-exact repair: capture "
+                    + field.getName() + " <- " + semantic
+                    + (value == null ? " (null allowed)" : ""));
         }
 
         if (unresolved != 0) {
-            log("deferred repair: synthetic Supplier captures incomplete; "
+            log("source-exact repair: Supplier capture map incomplete; "
                     + "assigned=" + assigned
                     + " unresolved=" + unresolved);
+            return false;
+        }
+        if (chromeAndroidTask == null) {
+            log("source-exact repair: ChromeAndroidTask supplier is still null");
             return false;
         }
 
@@ -1137,7 +1254,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         if (coordinator == null
                 || !coordinatorClass.isInstance(coordinator)) {
-            log("deferred repair: Chrome Supplier returned "
+            log("source-exact repair: Chrome Supplier returned "
                     + (coordinator == null
                         ? "null"
                         : coordinator.getClass().getName()));
@@ -1148,9 +1265,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         ACTIVE_COORDINATORS.put(activity, coordinator);
         scheduleRelocateExtensionsContainer(
                 activity, coordinator, 0);
-        log("deferred repair: Chrome Extensions coordinator created "
-                + "through " + symbols.extensionSupplierClassName
-                + ".get()");
+        log("source-exact repair: Extensions coordinator created through "
+                + symbols.extensionSupplierClassName + ".get()");
         return true;
     }
 
@@ -1161,8 +1277,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
      */
     private static Object findSupplierResultByType(
             Object manager,
-            Class<?> targetType,
-            boolean requireFactoryShape) {
+            Class<?> targetType) {
         if (manager == null || targetType == null) {
             return null;
         }
@@ -1191,10 +1306,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 ((java.util.function.Supplier<?>) supplier)
                                         .get();
                         if (value != null
-                                && targetType.isInstance(value)
-                                && (!requireFactoryShape
-                                    || hasExtensionFactoryShape(
-                                            value.getClass()))) {
+                                && targetType.isInstance(value)) {
                             return value;
                         }
                     } catch (Throwable ignored) {
@@ -1209,54 +1321,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             type = type.getSuperclass();
         }
         return null;
-    }
-
-    private static Object findExtensionFactorySupplierResult(
-            Object manager, Class<?> supplierClass) {
-        for (Field capture : supplierClass.getDeclaredFields()) {
-            if (java.lang.reflect.Modifier.isStatic(
-                    capture.getModifiers())
-                    || capture.getType().isPrimitive()) {
-                continue;
-            }
-
-            Class<?> target = capture.getType();
-            String name = target.getName();
-            if (target.isInstance(manager)
-                    || ViewStub.class.isAssignableFrom(target)
-                    || Runnable.class.isAssignableFrom(target)
-                    || "org.chromium.chrome.browser.profiles.Profile"
-                            .equals(name)
-                    || "org.chromium.components.embedder_support.contextmenu."
-                            .concat("ContextMenuPopulatorFactory")
-                            .equals(name)) {
-                continue;
-            }
-
-            Object candidate = findSupplierResultByType(
-                    manager, target, true);
-            if (candidate != null) {
-                return candidate;
-            }
-        }
-        return null;
-    }
-
-    private static boolean hasExtensionFactoryShape(Class<?> type) {
-        try {
-            for (Method method : type.getDeclaredMethods()) {
-                Class<?>[] parameters = method.getParameterTypes();
-                if (parameters.length == 2
-                        && java.util.function.Supplier.class
-                                .isAssignableFrom(parameters[1])
-                        && method.getReturnType() != void.class) {
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-            return false;
-        }
-        return false;
     }
 
     private static Object findMatchingInitializeArgument(
@@ -1422,7 +1486,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                     EXTENSIONS_ACTION.set(Boolean.TRUE);
 
-                    Object manager = ACTIVE_TOOLBAR_MANAGERS.get(activity);
+                    Object manager =
+                            resolveToolbarManagerForActivity(activity);
                     if (manager == null
                             || (toolbarManagerClass != null
                                 && !toolbarManagerClass.isInstance(manager))) {
