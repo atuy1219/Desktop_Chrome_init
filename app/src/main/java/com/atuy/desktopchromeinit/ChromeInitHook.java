@@ -18,11 +18,11 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import com.atuy.desktopchromeinit.compat.IXposedHookLoadPackage;
+import com.atuy.desktopchromeinit.compat.XC_MethodHook;
+import com.atuy.desktopchromeinit.compat.XposedBridge;
+import com.atuy.desktopchromeinit.compat.XposedHelpers;
+import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
 
 /**
  * Version-independent repair for Google Chrome Desktop Android builds running
@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.1-generic-failsafe";
+    private static final String BUILD_MARKER = "0.4.2-api102-generic";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -72,6 +72,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
             Collections.synchronizedMap(new WeakHashMap<>());
+
+    public static boolean isExtensionsMenuGuardInstalled() {
+        return emergencyMenuGuardInstalled;
+    }
 
     private static final class ToolbarSwap {
         final Object manager;
