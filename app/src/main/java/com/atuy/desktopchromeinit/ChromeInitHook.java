@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
+import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -118,14 +119,37 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         // toolbar/activity initialization.
         installApplicationAttachBootstrap();
 
-        if (lpparam.appInfo != null) {
-            initializeChromeHooks(
-                    lpparam.classLoader,
-                    lpparam.appInfo,
-                    "handleLoadPackage");
-        } else {
-            log("handleLoadPackage appInfo is null; deferring DEX resolution "
-                    + "to Application.attach");
+        boolean initializedFromCurrentApplication = false;
+        try {
+            Application current = AndroidAppHelper.currentApplication();
+            if (current != null
+                    && TARGET_PACKAGE.equals(current.getPackageName())) {
+                ClassLoader loader = current.getClassLoader();
+                if (loader == null) {
+                    loader = lpparam.classLoader;
+                }
+                chromeClassLoader = loader;
+                initializeChromeHooks(
+                        loader,
+                        current.getApplicationInfo(),
+                        "currentApplication");
+                initializedFromCurrentApplication = true;
+            }
+        } catch (Throwable t) {
+            log("currentApplication bootstrap unavailable: "
+                    + stackSummary(t));
+        }
+
+        if (!initializedFromCurrentApplication) {
+            if (lpparam.appInfo != null) {
+                initializeChromeHooks(
+                        lpparam.classLoader,
+                        lpparam.appInfo,
+                        "handleLoadPackage");
+            } else {
+                log("handleLoadPackage appInfo is null; deferring DEX "
+                        + "resolution to Application.attach");
+            }
         }
     }
 
