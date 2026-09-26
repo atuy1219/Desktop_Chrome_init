@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.8-cct-toolbar-layout";
+    private static final String BUILD_MARKER = "0.4.9-cct-slot-restore";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -1856,11 +1856,18 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         activity.runOnUiThread(() -> {
             try {
-                if (relocateExtensionsContainerToBottomBar(activity, coordinator)) {
-                    return;
-                }
-
-                if (relocateExtensionsContainerToCustomTab(activity, coordinator)) {
+                // Custom Tabs can still expose a bottom_bar_container in the
+                // hierarchy. If bottom-bar relocation runs first it consumes
+                // the Extensions container and the historical CCT behavior
+                // (replace Translate/optional_button with Extensions) never
+                // executes. Give the CCT slot strict priority.
+                if (isCustomTabToolbarActivity(activity)) {
+                    if (relocateExtensionsContainerToCustomTab(
+                            activity, coordinator)) {
+                        return;
+                    }
+                } else if (relocateExtensionsContainerToBottomBar(
+                        activity, coordinator)) {
                     return;
                 }
 
@@ -1885,6 +1892,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     private static boolean relocateExtensionsContainerToBottomBar(
             Activity activity, Object coordinator) throws Throwable {
+
+        // Never steal the Extensions container from a Custom Tab. CCT owns a
+        // dedicated optional/Translate slot handled below.
+        if (isCustomTabToolbarActivity(activity)) {
+            return false;
+        }
 
         Resources res = activity.getResources();
         int containerId = res.getIdentifier(
@@ -2179,6 +2192,40 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static boolean isCustomTabToolbarActivity(
+            Activity activity) {
+        if (activity == null) {
+            return false;
+        }
+        try {
+            Resources res = activity.getResources();
+            int toolbarId = res.getIdentifier(
+                    "toolbar", "id", TARGET_PACKAGE);
+            if (toolbarId == 0) {
+                return false;
+            }
+
+            View toolbar = activity.findViewById(toolbarId);
+            if (toolbar == null) {
+                return false;
+            }
+
+            Class<?> customTabToolbarClass =
+                    XposedHelpers.findClassIfExists(
+                            "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar",
+                            chromeClassLoader);
+            if (customTabToolbarClass != null) {
+                return customTabToolbarClass.isInstance(toolbar);
+            }
+
+            // Stable-name fallback only; no R8 symbol dependency.
+            return toolbar.getClass().getName().equals(
+                    "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /**
      * Custom Tab uses an overlay FrameLayout for end-aligned action buttons.
      * The adaptive optional_button is where the Translate button is displayed.
@@ -2200,9 +2247,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         View toolbar = activity.findViewById(toolbarId);
-        if (toolbar == null
-                || !toolbar.getClass().getName().contains(
-                        ".customtabs.features.toolbar.CustomTabToolbar")) {
+        if (toolbar == null || !isCustomTabToolbarActivity(activity)) {
             return false;
         }
 
