@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.9-cct-slot-restore";
+    private static final String BUILD_MARKER = "0.4.10-cct-safe-overlay";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -590,14 +590,43 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                         if (param.getThrowable() == null) {
                             Object coordinator = param.getResult();
                             if (coordinator != null) {
+                                ViewGroup reboundRoot = swap.realToolbar;
+
+                                /*
+                                 * CustomTabToolbar is not necessarily an
+                                 * ancestor of the injected Extensions
+                                 * container. Rebinding the RecyclerView's
+                                 * transition/focus root to CustomTabToolbar
+                                 * therefore creates a temporarily invalid view
+                                 * hierarchy and Android 16's FocusFinder can
+                                 * throw:
+                                 *   "parameter must be a descendant of this view"
+                                 *
+                                 * Use ToolbarControlContainer instead. It is
+                                 * the stable common ancestor of the CCT toolbar
+                                 * and the injected Extensions ViewStub, so it
+                                 * remains valid before and after visual
+                                 * positioning.
+                                 */
+                                if (isCustomTabToolbarView(
+                                        swap.realToolbar)) {
+                                    View control =
+                                            findToolbarControlContainer(
+                                                    swap.manager);
+                                    if (control instanceof ViewGroup) {
+                                        reboundRoot = (ViewGroup) control;
+                                    }
+                                }
+
                                 int replaced =
                                         replaceTemporaryToolbarReferences(
                                                 coordinator,
                                                 swap.temporaryToolbar,
-                                                swap.realToolbar);
-                                log("Supplier bridge: restored ToolbarPhone; "
+                                                reboundRoot);
+                                log("Supplier bridge: restored real toolbar; "
                                         + "rebound " + replaced
-                                        + " retained reference(s)");
+                                        + " retained reference(s) to "
+                                        + reboundRoot.getClass().getName());
                             }
                         }
                     } catch (Throwable t) {
@@ -2192,6 +2221,24 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
     }
 
+    private static boolean isCustomTabToolbarView(View view) {
+        if (view == null) {
+            return false;
+        }
+        try {
+            Class<?> customTabToolbarClass =
+                    XposedHelpers.findClassIfExists(
+                            "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar",
+                            chromeClassLoader);
+            if (customTabToolbarClass != null) {
+                return customTabToolbarClass.isInstance(view);
+            }
+        } catch (Throwable ignored) {
+        }
+        return view.getClass().getName().equals(
+                "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar");
+    }
+
     private static boolean isCustomTabToolbarActivity(
             Activity activity) {
         if (activity == null) {
@@ -2210,17 +2257,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 return false;
             }
 
-            Class<?> customTabToolbarClass =
-                    XposedHelpers.findClassIfExists(
-                            "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar",
-                            chromeClassLoader);
-            if (customTabToolbarClass != null) {
-                return customTabToolbarClass.isInstance(toolbar);
-            }
-
-            // Stable-name fallback only; no R8 symbol dependency.
-            return toolbar.getClass().getName().equals(
-                    "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar");
+            return isCustomTabToolbarView(toolbar);
         } catch (Throwable ignored) {
             return false;
         }
@@ -2309,83 +2346,142 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     });
         }
 
+        /*
+         * Keep the transition/focus root inside the real ancestor chain.
+         * The Extensions container is intentionally NOT reparented in CCT.
+         */
         View actionList = findNamedView(
                 extensionsToolbar, res, "extension_action_list");
-        if (actionList != null) {
-            rebindTransitionRoot(actionList, actionButtons);
+        ViewGroup originalParent =
+                extensionsToolbar.getParent() instanceof ViewGroup
+                        ? (ViewGroup) extensionsToolbar.getParent()
+                        : null;
+        if (actionList != null && originalParent != null) {
+            rebindTransitionRoot(actionList, originalParent);
         }
+
+        extensionsToolbar.post(() -> {
+            try {
+                View currentOptional =
+                        optionalId != 0
+                                ? toolbar.findViewById(optionalId)
+                                : null;
+                if (currentOptional != null) {
+                    syncCustomTabExtensionsToOptionalSlot(
+                            toolbar,
+                            actionButtons,
+                            currentOptional,
+                            extensionsToolbar);
+                }
+            } catch (Throwable t) {
+                log("CCT posted extension-slot sync failed: "
+                        + stackSummary(t));
+            }
+        });
 
         return true;
     }
 
+    /**
+     * Visually place Chrome's original Extensions container over the CCT
+     * optional/Translate slot without changing its parent.
+     *
+     * Reparenting the container into action_buttons used to work on older
+     * Chrome/Android builds, but on Chrome 154 + Android 16 it can leave focus
+     * and accessibility bookkeeping referring to a ViewGroup that no longer
+     * owns the candidate view. Keeping the original parent preserves Chrome's
+     * hierarchy while translation provides the same visual placement.
+     */
     private static void syncCustomTabExtensionsToOptionalSlot(
             View toolbar,
             FrameLayout actionButtons,
             View optionalButton,
             LinearLayout extensionsToolbar) {
 
-        ViewGroup.LayoutParams optionalBase = optionalButton.getLayoutParams();
-        if (!(optionalBase instanceof FrameLayout.LayoutParams)) {
+        if (toolbar == null
+                || optionalButton == null
+                || extensionsToolbar == null
+                || !(extensionsToolbar.getParent() instanceof ViewGroup)) {
             return;
         }
 
-        FrameLayout.LayoutParams source =
-                (FrameLayout.LayoutParams) optionalBase;
+        ViewGroup originalParent =
+                (ViewGroup) extensionsToolbar.getParent();
+
+        int extensionWidth = Math.max(
+                extensionsToolbar.getWidth(),
+                extensionsToolbar.getMeasuredWidth());
+        int extensionHeight = Math.max(
+                extensionsToolbar.getHeight(),
+                extensionsToolbar.getMeasuredHeight());
+        int optionalWidth = Math.max(
+                optionalButton.getWidth(),
+                optionalButton.getMeasuredWidth());
+        int optionalHeight = Math.max(
+                optionalButton.getHeight(),
+                optionalButton.getMeasuredHeight());
+
+        if (extensionWidth <= 0
+                || extensionHeight <= 0
+                || optionalWidth <= 0
+                || optionalHeight <= 0) {
+            return;
+        }
+
+        int[] parentLocation = new int[2];
+        int[] optionalLocation = new int[2];
+        originalParent.getLocationInWindow(parentLocation);
+        optionalButton.getLocationInWindow(optionalLocation);
+
+        boolean rtl =
+                toolbar.getLayoutDirection()
+                        == View.LAYOUT_DIRECTION_RTL;
+
+        float targetLeft =
+                optionalLocation[0] - parentLocation[0];
+        if (!rtl) {
+            // extensions_menu_button is the trailing child of the container,
+            // so align the complete container's trailing edge to the former
+            // Translate slot.
+            targetLeft += optionalWidth - extensionWidth;
+        }
+
+        float targetTop =
+                optionalLocation[1] - parentLocation[1]
+                        + (optionalHeight - extensionHeight) / 2.0f;
+
+        extensionsToolbar.setTranslationX(
+                targetLeft - extensionsToolbar.getLeft());
+        extensionsToolbar.setTranslationY(
+                targetTop - extensionsToolbar.getTop());
 
         optionalButton.setVisibility(View.GONE);
         optionalButton.setClickable(false);
         optionalButton.setFocusable(false);
-
-        if (extensionsToolbar.getParent() != actionButtons) {
-            ViewGroup oldParent =
-                    extensionsToolbar.getParent() instanceof ViewGroup
-                            ? (ViewGroup) extensionsToolbar.getParent()
-                            : null;
-            if (oldParent != null) {
-                oldParent.removeView(extensionsToolbar);
-            }
-            actionButtons.addView(extensionsToolbar);
-            log("moved extensions toolbar into Custom Tab Translate slot");
-        }
-
-        FrameLayout.LayoutParams target =
-                extensionsToolbar.getLayoutParams()
-                                instanceof FrameLayout.LayoutParams
-                        ? (FrameLayout.LayoutParams)
-                                extensionsToolbar.getLayoutParams()
-                        : new FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT);
-
-        int sourceStart = source.getMarginStart();
-        int sourceEnd = source.getMarginEnd();
-
-        boolean changed =
-                target.width != ViewGroup.LayoutParams.WRAP_CONTENT
-                        || target.height != source.height
-                        || target.gravity != source.gravity
-                        || target.leftMargin != source.leftMargin
-                        || target.topMargin != source.topMargin
-                        || target.rightMargin != source.rightMargin
-                        || target.bottomMargin != source.bottomMargin
-                        || target.getMarginStart() != sourceStart
-                        || target.getMarginEnd() != sourceEnd;
-
-        if (changed) {
-            target.width = ViewGroup.LayoutParams.WRAP_CONTENT;
-            target.height = source.height;
-            target.gravity = source.gravity;
-            target.leftMargin = source.leftMargin;
-            target.topMargin = source.topMargin;
-            target.rightMargin = source.rightMargin;
-            target.bottomMargin = source.bottomMargin;
-            target.setMarginStart(sourceStart);
-            target.setMarginEnd(sourceEnd);
-            extensionsToolbar.setLayoutParams(target);
-        }
+        optionalButton.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO);
 
         extensionsToolbar.setVisibility(View.VISIBLE);
         extensionsToolbar.setAlpha(1.0f);
+        extensionsToolbar.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+
+        /*
+         * Translation may draw outside an intermediate parent's nominal
+         * bounds. Disable clipping only; do not mutate parent/child ownership.
+         */
+        android.view.ViewParent parent = extensionsToolbar.getParent();
+        int depth = 0;
+        while (parent instanceof ViewGroup && depth++ < 8) {
+            ViewGroup group = (ViewGroup) parent;
+            group.setClipChildren(false);
+            group.setClipToPadding(false);
+            if (group == toolbar) {
+                break;
+            }
+            parent = group.getParent();
+        }
+
         extensionsToolbar.bringToFront();
     }
 
@@ -2410,6 +2506,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
                     String valueName = value.getClass().getName();
                     if (valueName.contains(".toolbar.top.Toolbar")
+                            || valueName.contains(
+                                    ".customtabs.features.toolbar.CustomTabToolbar")
                             || value == actionListView.getParent()) {
                         field.set(actionListView, newRoot);
                         log("rebound extension transition root via field "
