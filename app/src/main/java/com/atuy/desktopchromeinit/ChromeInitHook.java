@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.10-cct-safe-overlay";
+    private static final String BUILD_MARKER = "0.4.11-cct-real-menu-button";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -77,6 +77,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final Map<View, View> CUSTOM_TAB_EXTENSION_BUTTONS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     public static boolean isExtensionsMenuGuardInstalled() {
@@ -2298,6 +2301,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 "action_buttons", "id", TARGET_PACKAGE);
         int optionalId = res.getIdentifier(
                 "optional_button", "id", TARGET_PACKAGE);
+        int extensionsMenuId = res.getIdentifier(
+                "extensions_menu_button", "id", TARGET_PACKAGE);
 
         View actionButtonsView =
                 actionsId != 0 ? toolbar.findViewById(actionsId) : null;
@@ -2312,18 +2317,95 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log("CCT relocation pending: optional/Translate button not inflated");
             return false;
         }
+        if (extensionsMenuId == 0) {
+            log("CCT relocation pending: extensions_menu_button id missing");
+            return false;
+        }
 
         FrameLayout actionButtons = (FrameLayout) actionButtonsView;
         LinearLayout extensionsToolbar = (LinearLayout) extensionsContainer;
 
-        syncCustomTabExtensionsToOptionalSlot(
+        View extensionsMenuButton =
+                CUSTOM_TAB_EXTENSION_BUTTONS.get(toolbar);
+
+        if (extensionsMenuButton == null) {
+            View candidate =
+                    extensionsToolbar.findViewById(extensionsMenuId);
+            if (candidate == null) {
+                log("CCT relocation pending: real Extensions menu button unavailable");
+                return false;
+            }
+
+            /*
+             * Move only Chrome's real ListMenuButton into the CCT action slot.
+             *
+             * Unlike moving the entire Extensions container, this does not
+             * disturb ExtensionActionListRecyclerView's parent/focus hierarchy.
+             * ExtensionsMenuCoordinator and the property-model binder both
+             * retain the original button object, so popup anchoring continues
+             * to use the visible CCT button.
+             *
+             * ExtensionsToolbarCoordinatorImpl.showExtensionsMenu() later
+             * performs mContainer.findViewById(extensions_menu_button), so
+             * leave a tiny proxy View with the original id inside mContainer
+             * that forwards programmatic performClick() calls to the moved
+             * real button.
+             */
+            ViewGroup oldParent =
+                    candidate.getParent() instanceof ViewGroup
+                            ? (ViewGroup) candidate.getParent()
+                            : null;
+            if (oldParent == null) {
+                log("CCT relocation pending: Extensions menu button parent unavailable");
+                return false;
+            }
+
+            int oldIndex = oldParent.indexOfChild(candidate);
+            ViewGroup.LayoutParams oldLayoutParams =
+                    candidate.getLayoutParams();
+
+            oldParent.removeView(candidate);
+
+            final View realButton = candidate;
+            View proxy = new View(candidate.getContext());
+            proxy.setId(extensionsMenuId);
+            proxy.setVisibility(View.GONE);
+            proxy.setFocusable(false);
+            proxy.setClickable(true);
+            proxy.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            proxy.setOnClickListener(v -> realButton.performClick());
+
+            if (oldLayoutParams != null) {
+                oldParent.addView(
+                        proxy,
+                        Math.max(0, Math.min(oldIndex, oldParent.getChildCount())),
+                        oldLayoutParams);
+            } else {
+                oldParent.addView(
+                        proxy,
+                        Math.max(0, Math.min(oldIndex, oldParent.getChildCount())));
+            }
+
+            // Avoid duplicate ids in one activity tree. showExtensionsMenu()
+            // finds the proxy by id; coordinators already hold realButton.
+            realButton.setId(View.NO_ID);
+            CUSTOM_TAB_EXTENSION_BUTTONS.put(toolbar, realButton);
+            extensionsMenuButton = realButton;
+
+            log("CCT: moved real Extensions menu button into optional slot "
+                    + "and installed mContainer click proxy");
+        }
+
+        syncCustomTabMenuButtonToOptionalSlot(
                 toolbar,
                 actionButtons,
                 optionalButton,
-                extensionsToolbar);
+                extensionsMenuButton);
 
         if (!CUSTOM_TAB_LAYOUT_HOOKS.containsKey(toolbar)) {
             CUSTOM_TAB_LAYOUT_HOOKS.put(toolbar, Boolean.TRUE);
+            final View stableExtensionsMenuButton = extensionsMenuButton;
             toolbar.addOnLayoutChangeListener(
                     (v, left, top, right, bottom,
                             oldLeft, oldTop, oldRight, oldBottom) -> {
@@ -2333,22 +2415,22 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                             ? toolbar.findViewById(optionalId)
                                             : null;
                             if (currentOptional != null) {
-                                syncCustomTabExtensionsToOptionalSlot(
+                                syncCustomTabMenuButtonToOptionalSlot(
                                         toolbar,
                                         actionButtons,
                                         currentOptional,
-                                        extensionsToolbar);
+                                        stableExtensionsMenuButton);
                             }
                         } catch (Throwable t) {
-                            log("CCT extension-slot sync failed: "
+                            log("CCT menu-slot sync failed: "
                                     + stackSummary(t));
                         }
                     });
         }
 
         /*
-         * Keep the transition/focus root inside the real ancestor chain.
-         * The Extensions container is intentionally NOT reparented in CCT.
+         * Action-list transitions remain rooted in Chrome's original
+         * Extensions hierarchy. Only the menu button itself moved.
          */
         View actionList = findNamedView(
                 extensionsToolbar, res, "extension_action_list");
@@ -2360,129 +2442,78 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             rebindTransitionRoot(actionList, originalParent);
         }
 
-        extensionsToolbar.post(() -> {
-            try {
-                View currentOptional =
-                        optionalId != 0
-                                ? toolbar.findViewById(optionalId)
-                                : null;
-                if (currentOptional != null) {
-                    syncCustomTabExtensionsToOptionalSlot(
-                            toolbar,
-                            actionButtons,
-                            currentOptional,
-                            extensionsToolbar);
-                }
-            } catch (Throwable t) {
-                log("CCT posted extension-slot sync failed: "
-                        + stackSummary(t));
-            }
-        });
-
         return true;
     }
 
-    /**
-     * Visually place Chrome's original Extensions container over the CCT
-     * optional/Translate slot without changing its parent.
-     *
-     * Reparenting the container into action_buttons used to work on older
-     * Chrome/Android builds, but on Chrome 154 + Android 16 it can leave focus
-     * and accessibility bookkeeping referring to a ViewGroup that no longer
-     * owns the candidate view. Keeping the original parent preserves Chrome's
-     * hierarchy while translation provides the same visual placement.
-     */
-    private static void syncCustomTabExtensionsToOptionalSlot(
+    private static void syncCustomTabMenuButtonToOptionalSlot(
             View toolbar,
             FrameLayout actionButtons,
             View optionalButton,
-            LinearLayout extensionsToolbar) {
+            View extensionsMenuButton) {
 
         if (toolbar == null
+                || actionButtons == null
                 || optionalButton == null
-                || extensionsToolbar == null
-                || !(extensionsToolbar.getParent() instanceof ViewGroup)) {
+                || extensionsMenuButton == null) {
             return;
         }
 
-        ViewGroup originalParent =
-                (ViewGroup) extensionsToolbar.getParent();
-
-        int extensionWidth = Math.max(
-                extensionsToolbar.getWidth(),
-                extensionsToolbar.getMeasuredWidth());
-        int extensionHeight = Math.max(
-                extensionsToolbar.getHeight(),
-                extensionsToolbar.getMeasuredHeight());
-        int optionalWidth = Math.max(
-                optionalButton.getWidth(),
-                optionalButton.getMeasuredWidth());
-        int optionalHeight = Math.max(
-                optionalButton.getHeight(),
-                optionalButton.getMeasuredHeight());
-
-        if (extensionWidth <= 0
-                || extensionHeight <= 0
-                || optionalWidth <= 0
-                || optionalHeight <= 0) {
+        ViewGroup.LayoutParams optionalBase =
+                optionalButton.getLayoutParams();
+        if (!(optionalBase instanceof FrameLayout.LayoutParams)) {
             return;
         }
 
-        int[] parentLocation = new int[2];
-        int[] optionalLocation = new int[2];
-        originalParent.getLocationInWindow(parentLocation);
-        optionalButton.getLocationInWindow(optionalLocation);
+        FrameLayout.LayoutParams source =
+                (FrameLayout.LayoutParams) optionalBase;
 
-        boolean rtl =
-                toolbar.getLayoutDirection()
-                        == View.LAYOUT_DIRECTION_RTL;
-
-        float targetLeft =
-                optionalLocation[0] - parentLocation[0];
-        if (!rtl) {
-            // extensions_menu_button is the trailing child of the container,
-            // so align the complete container's trailing edge to the former
-            // Translate slot.
-            targetLeft += optionalWidth - extensionWidth;
-        }
-
-        float targetTop =
-                optionalLocation[1] - parentLocation[1]
-                        + (optionalHeight - extensionHeight) / 2.0f;
-
-        extensionsToolbar.setTranslationX(
-                targetLeft - extensionsToolbar.getLeft());
-        extensionsToolbar.setTranslationY(
-                targetTop - extensionsToolbar.getTop());
-
-        optionalButton.setVisibility(View.GONE);
+        optionalButton.setVisibility(View.INVISIBLE);
         optionalButton.setClickable(false);
         optionalButton.setFocusable(false);
         optionalButton.setImportantForAccessibility(
                 View.IMPORTANT_FOR_ACCESSIBILITY_NO);
 
-        extensionsToolbar.setVisibility(View.VISIBLE);
-        extensionsToolbar.setAlpha(1.0f);
-        extensionsToolbar.setImportantForAccessibility(
-                View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
-
-        /*
-         * Translation may draw outside an intermediate parent's nominal
-         * bounds. Disable clipping only; do not mutate parent/child ownership.
-         */
-        android.view.ViewParent parent = extensionsToolbar.getParent();
-        int depth = 0;
-        while (parent instanceof ViewGroup && depth++ < 8) {
-            ViewGroup group = (ViewGroup) parent;
-            group.setClipChildren(false);
-            group.setClipToPadding(false);
-            if (group == toolbar) {
-                break;
+        if (extensionsMenuButton.getParent() != actionButtons) {
+            ViewGroup currentParent =
+                    extensionsMenuButton.getParent() instanceof ViewGroup
+                            ? (ViewGroup) extensionsMenuButton.getParent()
+                            : null;
+            if (currentParent != null) {
+                currentParent.removeView(extensionsMenuButton);
             }
-            parent = group.getParent();
+            actionButtons.addView(extensionsMenuButton);
         }
 
-        extensionsToolbar.bringToFront();
+        FrameLayout.LayoutParams target =
+                extensionsMenuButton.getLayoutParams()
+                                instanceof FrameLayout.LayoutParams
+                        ? (FrameLayout.LayoutParams)
+                                extensionsMenuButton.getLayoutParams()
+                        : new FrameLayout.LayoutParams(
+                                source.width,
+                                source.height);
+
+        target.width = source.width;
+        target.height = source.height;
+        target.gravity = source.gravity;
+        target.leftMargin = source.leftMargin;
+        target.topMargin = source.topMargin;
+        target.rightMargin = source.rightMargin;
+        target.bottomMargin = source.bottomMargin;
+        target.setMarginStart(source.getMarginStart());
+        target.setMarginEnd(source.getMarginEnd());
+        extensionsMenuButton.setLayoutParams(target);
+
+        extensionsMenuButton.setTranslationX(0f);
+        extensionsMenuButton.setTranslationY(0f);
+        extensionsMenuButton.setVisibility(View.VISIBLE);
+        extensionsMenuButton.setAlpha(1.0f);
+        extensionsMenuButton.setEnabled(true);
+        extensionsMenuButton.setClickable(true);
+        extensionsMenuButton.setFocusable(true);
+        extensionsMenuButton.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        extensionsMenuButton.bringToFront();
     }
 
     private static void rebindTransitionRoot(
