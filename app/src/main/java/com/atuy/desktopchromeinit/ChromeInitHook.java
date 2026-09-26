@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.7-viewstub-source-exact";
+    private static final String BUILD_MARKER = "0.4.8-cct-toolbar-layout";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -935,21 +935,49 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return null;
         }
 
+        /*
+         * Chromium declares ToolbarManager.mToolbarLayout as the stable
+         * ToolbarLayout base type. Runtime implementations include
+         * ToolbarPhone, ToolbarTablet and CustomTabToolbar.
+         *
+         * Do not whitelist concrete implementations here: Custom Tabs use
+         * CustomTabToolbar, and a ToolbarPhone/ToolbarTablet-only check lets
+         * bus.get() reach its hard ToolbarTablet cast unchanged and crash.
+         */
+        Class<?> toolbarLayoutClass = XposedHelpers.findClassIfExists(
+                "org.chromium.chrome.browser.toolbar.top.ToolbarLayout",
+                chromeClassLoader);
+
         Class<?> type = manager.getClass();
         while (type != null) {
             try {
                 for (Field field : type.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(
+                            field.getModifiers())) {
+                        continue;
+                    }
+
                     field.setAccessible(true);
                     Object value = field.get(manager);
                     if (!(value instanceof ViewGroup)) {
                         continue;
                     }
 
+                    if (toolbarLayoutClass != null
+                            && toolbarLayoutClass.isInstance(value)) {
+                        return field;
+                    }
+
+                    // Conservative fallback for builds where ToolbarLayout
+                    // itself cannot be resolved. Use only stable Chromium
+                    // toolbar package/class identities, never R8 names.
                     String name = value.getClass().getName();
-                    if (name.endsWith(".ToolbarPhone")
-                            || name.endsWith(".ToolbarTablet")
-                            || name.contains(".toolbar.top.ToolbarPhone")
-                            || name.contains(".toolbar.top.ToolbarTablet")) {
+                    if (name.equals(
+                                    "org.chromium.chrome.browser.toolbar.top.ToolbarPhone")
+                            || name.equals(
+                                    "org.chromium.chrome.browser.toolbar.top.ToolbarTablet")
+                            || name.equals(
+                                    "org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar")) {
                         return field;
                     }
                 }
