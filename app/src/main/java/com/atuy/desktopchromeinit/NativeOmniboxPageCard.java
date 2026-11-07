@@ -17,6 +17,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -250,7 +251,16 @@ final class NativeOmniboxPageCard {
                 }
             } catch (Throwable ignored) {}
         }
-        if (!added) return false;
+        if (!added) {
+            // R8 may inline BaseSuggestionView.setActionButtonsCount(int).
+            // SuggestionLayout's layout params (from its existing decoration
+            // child) still encode the stable ACTION_BUTTON role as type=2.
+            // Add Android ImageViews with *Chrome's own* action ViewGroup
+            // layout params, rather than falling back to an unrelated
+            // 2-row custom card.
+            if (!appendNativeLayoutActionButtons(card, activity)) return false;
+            info("R8 removed native action builder; using native action layout");
+        }
 
         List<ImageView> actions = new ArrayList<>();
         for (int i = initial; i < card.getChildCount(); i++) {
@@ -311,6 +321,74 @@ final class NativeOmniboxPageCard {
             action.setOnClickListener(v -> callback.run());
         }
         return true;
+    }
+
+    private static boolean appendNativeLayoutActionButtons(
+            ViewGroup card, Activity activity) {
+        if (card.getChildCount() < 1) return false;
+        ViewGroup.LayoutParams reference = card.getChildAt(0).getLayoutParams();
+        if (reference == null) return false;
+        Class<?> layoutClass = reference.getClass();
+        ViewGroup.LayoutParams[] params = new ViewGroup.LayoutParams[3];
+
+        try {
+            for (int i = 0; i < params.length; i++) {
+                params[i] = nativeActionLayoutParams(layoutClass);
+                if (params[i] == null) return false;
+            }
+            int foreground = id(activity, "action_button_foreground_selector",
+                    "drawable");
+            for (int i = 0; i < params.length; i++) {
+                ImageView action = new ImageView(activity);
+                action.setClickable(true);
+                action.setFocusable(true);
+                action.setScaleType(ImageView.ScaleType.CENTER);
+                if (foreground != 0) {
+                    action.setForeground(activity.getDrawable(foreground));
+                }
+                card.addView(action, params[i]);
+            }
+            return true;
+        } catch (Throwable error) {
+            Log.w(TAG, "Native ACTION_BUTTON layout fallback failed", error);
+            return false;
+        }
+    }
+
+    private static ViewGroup.LayoutParams nativeActionLayoutParams(
+            Class<?> layoutClass) {
+        for (Method method : layoutClass.getDeclaredMethods()) {
+            if (!Modifier.isStatic(method.getModifiers())
+                    || method.getParameterCount() != 1
+                    || method.getParameterTypes()[0] != int.class
+                    || !ViewGroup.LayoutParams.class.isAssignableFrom(
+                            method.getReturnType())) continue;
+            try {
+                method.setAccessible(true);
+                Object result = method.invoke(null, 2);
+                if (result instanceof ViewGroup.LayoutParams) {
+                    return (ViewGroup.LayoutParams) result;
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        // Source: SuggestionLayout.LayoutParams(int width, int height,
+        // @SuggestionViewType int type, boolean largeDecoration).
+        for (Constructor<?> ctor : layoutClass.getDeclaredConstructors()) {
+            Class<?>[] args = ctor.getParameterTypes();
+            if (args.length != 4 || args[0] != int.class || args[1] != int.class
+                    || args[2] != int.class || args[3] != boolean.class) continue;
+            try {
+                ctor.setAccessible(true);
+                Object result = ctor.newInstance(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 2, false);
+                if (result instanceof ViewGroup.LayoutParams) {
+                    return (ViewGroup.LayoutParams) result;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return null;
     }
 
     static void styleLegacyFallback(ViewGroup dropdown, ViewGroup card) {
