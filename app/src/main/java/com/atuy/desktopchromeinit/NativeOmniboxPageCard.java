@@ -8,8 +8,6 @@ import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
-import android.net.Uri;
-import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
@@ -408,11 +406,31 @@ final class NativeOmniboxPageCard {
             for (int j = 0; j < ours.size(); j++) {
                 ours.get(j).setTextColor(j == 0 ? primary : secondary);
             }
+            List<ImageView> fallbackIcons = new ArrayList<>();
+            collectImages(card, fallbackIcons, 0);
+            for (int j = 0; j < fallbackIcons.size(); j++) {
+                fallbackIcons.get(j).setImageTintList(ColorStateList.valueOf(
+                        j == 0 ? secondary : primary));
+            }
             Drawable source = reference.getBackground();
             if (source != null && source.getConstantState() != null) {
                 card.setBackground(source.getConstantState().newDrawable().mutate());
             }
             break;
+        }
+    }
+
+    private static void collectImages(
+            View view, List<ImageView> out, int depth) {
+        if (depth > 7) return;
+        if (view instanceof ImageView) {
+            out.add((ImageView) view);
+            return;
+        }
+        if (!(view instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            collectImages(group.getChildAt(i), out, depth + 1);
         }
     }
 
