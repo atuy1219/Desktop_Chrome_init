@@ -7,6 +7,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.Outline;
+import android.net.Uri;
+import android.view.ViewOutlineProvider;
 import android.graphics.drawable.Drawable;
 import android.util.Log;
 import android.view.View;
@@ -41,7 +45,8 @@ final class NativeOmniboxPageCard {
     private static final int EDIT_URL_SUGGESTION = 1; // Chromium 158 enum
 
     static ViewGroup build(Activity activity, ViewGroup dropdown,
-            String title, String fullUrl, Bitmap favicon, TextView urlBar) {
+            String title, String fullUrl, Bitmap favicon, TextView urlBar,
+            boolean incognito) {
         try {
             ViewGroup card = createFromChromeFactory(dropdown);
             if (card == null) {
@@ -71,7 +76,13 @@ final class NativeOmniboxPageCard {
             }
             first.setText(title);
             first.setVisibility(View.VISIBLE);
-            second.setText(fullUrl);
+            // Chromium's URL formatter exposes the display URL, not the
+            // copy/share target. The full validated URL is retained for all
+            // actions; the suggestion displays the readable host.
+            Uri parsed = Uri.parse(fullUrl);
+            String displayedUrl = parsed.getHost();
+            if (displayedUrl == null) displayedUrl = fullUrl;
+            second.setText(displayedUrl);
             second.setTextDirection(View.TEXT_DIRECTION_LTR);
             second.setVisibility(View.VISIBLE);
 
@@ -93,6 +104,8 @@ final class NativeOmniboxPageCard {
                 }
             }
 
+            configureOriginalSuggestionDimensions(card, activity);
+
             boolean builtNativeButtons = createNativeActions(
                     card, activity, fullUrl, urlBar, first);
             ViewGroup finalCard = card;
@@ -102,7 +115,8 @@ final class NativeOmniboxPageCard {
                 // BaseSuggestionView content and normal suggestion colors.
                 // Only the ACTION_BUTTON container is supplied externally.
                 finalCard = wrapWithChromeStyleActions(
-                        activity, card, nativeReference, fullUrl, urlBar, first);
+                        activity, card, nativeReference, fullUrl, urlBar, first,
+                        incognito);
                 info("native BaseSuggestionView kept; action buttons use "
                         + "measured native-layout overlay");
             }
@@ -168,10 +182,76 @@ final class NativeOmniboxPageCard {
                 : primary.getCurrentTextColor());
     }
 
+    private static void configureOriginalSuggestionDimensions(
+            ViewGroup view, Context context) {
+        // Newly inflated BaseSuggestionView is unbound, so its four
+        // SuggestionLayout dimensions start as zeros. This was why the
+        // favicon and text overlapped the left edge in v0.4.23.
+        final int[] sizes = {
+                dimension(context, "omnibox_suggestion_icon_area_size", 56),
+                dimension(context, "omnibox_suggestion_content_height", 56),
+                dimension(context, "omnibox_suggestion_compact_content_height", 48),
+                dimension(context, "omnibox_suggestion_content_padding", 8)
+        };
+        for (Class<?> cls = view.getClass(); cls != null
+                && cls != ViewGroup.class && cls != View.class;
+                cls = cls.getSuperclass()) {
+            for (Method m : cls.getDeclaredMethods()) {
+                Class<?>[] p = m.getParameterTypes();
+                if (m.getReturnType() != void.class || p.length != 4
+                        || p[0] != int.class || p[1] != int.class
+                        || p[2] != int.class || p[3] != int.class) continue;
+                try {
+                    m.setAccessible(true);
+                    m.invoke(view, sizes[0], sizes[1], sizes[2], sizes[3]);
+                    info("initialized native SuggestionLayout dimensions "
+                            + sizes[0] + "/" + sizes[1] + "/" + sizes[2]);
+                    return;
+                } catch (Throwable ignored) {}
+            }
+        }
+        info("native SuggestionLayout dimension binder R8-inaccessible");
+    }
+
+    private static int dimension(Context ctx, String name, int fallbackDp) {
+        int id = id(ctx, name, "dimen");
+        return id == 0
+                ? dp(ctx, fallbackDp)
+                : ctx.getResources().getDimensionPixelSize(id);
+    }
+
+    private static void applyChromeCardSurface(
+            FrameLayout wrapper, Activity activity, ViewGroup reference,
+            boolean incognito) {
+        // Chromium OmniboxResourceProvider.getStandardSuggestionBackgroundColor()
+        // uses exactly these two resources. Sample the installed APK to
+        // respect dark/light theme, Incognito, and Google's future changes.
+        String name = incognito
+                ? "search_suggestion_bg_color_incognito"
+                : "search_suggestion_bg_color";
+        int colorResource = id(activity, name, "color");
+        int color = colorResource != 0 ? activity.getColor(colorResource)
+                : 0xff10151b;
+        final int radius = dimension(
+                activity, "omnibox_suggestion_bg_round_corner_radius", 16);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(color);
+        shape.setCornerRadius(radius);
+        wrapper.setBackground(shape);
+        wrapper.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View view, Outline outline) {
+                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radius);
+            }
+        });
+        wrapper.setClipToOutline(true);
+    }
+
     private static ViewGroup wrapWithChromeStyleActions(
             Activity activity, ViewGroup chromeRow, ViewGroup reference,
-            String fullUrl, TextView urlBar, TextView title) {
+            String fullUrl, TextView urlBar, TextView title,
+            boolean incognito) {
         FrameLayout wrapper = new FrameLayout(activity);
+        applyChromeCardSurface(wrapper, activity, reference, incognito);
         int actionWidthId = id(activity, "omnibox_suggestion_action_button_width", "dimen");
         int actionWidth = actionWidthId == 0
                 ? dp(activity, 48)
@@ -186,7 +266,7 @@ final class NativeOmniboxPageCard {
                 chromeRow.getPaddingBottom());
         FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+                ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER_VERTICAL);
         wrapper.addView(chromeRow, rowParams);
 
         LinearLayout buttons = new LinearLayout(activity);
@@ -237,7 +317,12 @@ final class NativeOmniboxPageCard {
             if (button == null) button = new ImageView(activity);
             button.setClickable(true);
             button.setFocusable(true);
-            button.setScaleType(ImageView.ScaleType.CENTER);
+            // Android ImageView.CENTER draws the full 24dp vector, which is
+            // visibly larger than Chrome's 20dp Omnibox small-icon policy.
+            // Keep a 48dp touch target but constrain the drawable area.
+            button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            int inset = Math.max(0, (actionWidth - dp(activity, 20)) / 2);
+            button.setPadding(inset, inset, inset, inset);
             if (foreground != 0) {
                 button.setForeground(activity.getDrawable(foreground));
             }
