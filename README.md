@@ -78,39 +78,50 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
-## Native Android current-page suggestion (unmerged test, 0.4.19)
+## Extension-only mobile experience (unmerged test, 0.4.20)
 
-Chrome 158 already ships the built-in `EditUrlSuggestionProcessor`, which
-renders the current page's title, URL, favicon, and Share/Copy/Edit actions as
-the first suggestion when the user focuses an empty Omnibox on a website.
+**Purpose:** use Chrome Desktop Android's compiled extension engine while
+leaving the phone's normal Chrome UI and input behaviors untouched.
 
-That processor deliberately rejects desktop-experience contexts:
-`if (OmniboxCapabilities.hasDesktopExperience(mContext)) return false;`.
-The desktop-like input retention branch in `FuseboxSessionState.activate()`
-instead pre-fills the current URL in the editor. For the requested Android
-phone behavior, these modes must not be mixed.
+The module installs **only extension-related hooks**. The previous Omnibox
+compatibility hooks and the temporary URL recovery hook have been removed.
+No platform identity spoofing or global `DeviceInfo.isDesktop()` override is
+performed. The phone's Android Bottom Bar, URL editing, suggestions, keyboard,
+back gesture, and tab navigation remain Chrome-owned.
 
-**This test reverts the custom v0.4.18 focus-time URL restoration.** It removes
-two ineffective hooks that referenced R8-obfuscated
-`OmniboxCapabilities` / `OmniboxFeatures` classes, and leaves the
-Chromium-native current-page card and zero-prefix suggestions untouched.
-A resource-filtered, framework-only `TextView.onFocusChanged` trace remains.
+Chrome 158 already includes the native `EditUrlSuggestionProcessor`. On
+non-desktop input devices, focusing an empty Omnibox may show the current
+page title, URL, favicon, and Share/Copy/Edit buttons as the first zero-prefix
+suggestion; the relevant `hasDesktopExperience()` test is not overridden.
 
-No custom suggestion UI, private Chrome class mapping, synthetic Java-only
-suggestions, or replacement URL metadata is introduced. On a phone running
-this desktop APK, the card should appear if the release APK still registers
-`EditUrlSuggestionProcessor` and receives a first `what-you-typed` URL
-suggestion corresponding to the active tab. These are real runtime
-preconditions, not a guarantee. Test the actual UI, including Share,
-Copy, Edit, keyboard, changing tabs, and search input.
+**Build-time limitations.** A Desktop Android APK differs from a mobile APK
+before this LSPosed module loads. Chrome 158 has build-variant defaults:
 
-To inspect focused text state without logging personal URLs:
+| Feature / path | Desktop build default | Extension dependency / decision |
+| --- | --- | --- |
+| `EnableAndroidSidePanel` | true | May be needed by extension side-panel API: do not disable blindly |
+| `ChromeNativeUrlOverriding` | true | The extensions URL override registry depends on it: **preserve** |
+| `UseWebUiNtpAndroid` | true | The WebUI NTP override additionally checks `DeviceInfo.isDesktop()` |
+| `WebUiAndroidTheming` | true | Shared WebUI theming; not disabled without testing extension pages |
+| Bookmark row display fallback | compact | Mobile layout requires a persisted preference or a Chromium-side change |
 
-```sh
-su -c 'logcat -d -v threadtime -b main | grep "DesktopChromeInit.*URLBAR" | tail -n 100'
-```
+On a normal phone, `DeviceInfo.isDesktop()` should already be false because
+the runtime device does not advertise `android.hardware.type.pc` (unless a
+desktop command-line override is active). Thus many Desktop-exclusive runtime
+paths are already inactive. Do not force it to true just to enable extensions.
 
-**Do not merge until confirmed on device and explicitly requested.**
+**Strict meaning of “all Desktop elements removed”:** the module can leave
+mobile UX unchanged and avoid activating Desktop-only UI, but cannot strip
+compiled Desktop code or override every native build flag. Full parity would
+require a Chromium Android build with extensions explicitly enabled while
+using mobile build defaults.
+
+**Regression checks:** CI rejects reintroduction of hard-coded Omnibox
+class-name hooks or global desktop identity spoofing. This does not verify
+runtime behavior. Device tests must cover: editing the URL, current-page
+suggestion actions, keyboard, Back, normal tab switching, opening pinned and
+unpinned extensions, closing an extension popup, and extension URL overrides.
+No merge until these pass and the user explicitly requests it.
 
 ## Chrome 158 compatibility (0.4.12)
 
@@ -124,22 +135,6 @@ callback rather than incorrectly reusing the coordinator destruction callback.
 **Status:** This adjustment is based on upstream Chromium 158 source. The
 Chrome 158 release DEX has **not yet been verified on a device**; a successful
 APK build alone does not prove the Extensions popup is working.
-
-On unsupported phone devices that install the Desktop Android Chrome APK, the
-module additionally attempts two isolated Omnibox hooks:
-
-- `OmniboxCapabilities.hasDesktopExperience(Context)`: retain the current URL
-  when the address bar gains focus, without spoofing `DeviceInfo.isDesktop()`
-  for the entire Chrome process.
-- `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled()`: disable the
-  internal 150 ms IME visibility debounce and use immediate show/hide requests
-  instead. This is an experimental workaround for stale keyboard state; it
-  does not repair a system-level InputDispatcher or navigation-gesture failure.
-
-Both changes are applied only when the Chrome package has an Extensions menu
-resource and Android does not report `android.hardware.type.pc`. If R8 has
-renamed the relevant Java classes/methods in the installed Chrome APK, the
-hooks fail safely and log that they were not installed.
 
 ### Diagnostics
 
