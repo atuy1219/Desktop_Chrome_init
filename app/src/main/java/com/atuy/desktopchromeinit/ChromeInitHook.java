@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.11-cct-real-menu-button";
+    private static final String BUILD_MARKER = "0.4.12-chrome158-input-extensions";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -171,6 +171,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
     }
 
+    static Application getCurrentChromeApplicationForInputFix() {
+        return getCurrentApplication();
+    }
+
     private static Application getCurrentApplication() {
         try {
             Class<?> activityThread =
@@ -253,6 +257,11 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             log(origin + ": classLoader/appInfo unavailable");
             return;
         }
+
+        // These hooks avoid changing DeviceInfo.isDesktop() for the process.
+        // They only affect Omnibox behavior on unsupported desktop-on-phone
+        // installs and do not depend on the Extensions DEX resolver.
+        ChromeInputCompatibility.install(classLoader);
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier
@@ -362,6 +371,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                         }
 
                                         EXTENSIONS_ACTION.set(Boolean.TRUE);
+                                        log("Extensions menu click: manager="
+                                                + (resolveToolbarManagerForActivity(activity) != null)
+                                                + " symbols=" + (resolvedSymbols != null));
 
                                         // If the full resolver is active and
                                         // we already know the ToolbarManager,
@@ -423,12 +435,16 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                                 param.getThrowable();
                                         if (throwable
                                                 instanceof NullPointerException) {
+                                            lastRepairFailure = "Extensions-menu NPE: "
+                                                    + stackSummary(throwable);
                                             log("emergency guard suppressed "
                                                     + "Extensions-menu NPE in "
                                                     + candidate.methodName
                                                     + ": "
-                                                    + stackSummary(
-                                                            throwable));
+                                                    + stackSummary(throwable));
+                                            if (param.thisObject instanceof Activity) {
+                                                showRepairFailure((Activity) param.thisObject);
+                                            }
                                             param.setResult(true);
                                         }
                                     }
@@ -1226,7 +1242,26 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         int assigned = 0;
         int unresolved = 0;
+        int runnableCaptureIndex = 0;
         Object chromeAndroidTask = null;
+
+        // Chromium 158 added a second Runnable capture:
+        // this::enterDraftingNoFocusOrEndInput. Feeding the original cleanup
+        // Runnable into both captures destroys the Extensions coordinator
+        // when Chrome merely wants to dismiss the Omnibox.
+        Runnable unfocusOmnibox = () -> {
+            try {
+                activity.runOnUiThread(() -> {
+                    View focus = activity.getCurrentFocus();
+                    if (focus instanceof android.widget.EditText) {
+                        focus.clearFocus();
+                    }
+                });
+            } catch (Throwable t) {
+                log("Extensions Omnibox focus callback failed: "
+                        + stackSummary(t));
+            }
+        };
 
         for (Field field : supplierClass.getDeclaredFields()) {
             if (java.lang.reflect.Modifier.isStatic(
@@ -1254,9 +1289,22 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 resolved = true;
                 semantic = "Profile";
             } else if (Runnable.class.isAssignableFrom(fieldType)) {
-                value = cleanup;
-                resolved = true;
-                semantic = "cleanup Runnable";
+                // The synthetic capture fields were emitted in lambda capture
+                // order on the currently verified Chrome build. Never reuse
+                // the destructive cleanup callback for a second Runnable.
+                if (runnableCaptureIndex == 0) {
+                    value = cleanup;
+                    resolved = true;
+                    semantic = "cleanup Runnable";
+                } else if (runnableCaptureIndex == 1) {
+                    value = unfocusOmnibox;
+                    resolved = true;
+                    semantic = "Omnibox focus-release Runnable (Chrome 158+)";
+                } else {
+                    log("source-exact repair: unexpected Runnable capture "
+                            + runnableCaptureIndex);
+                }
+                runnableCaptureIndex++;
             } else if (contextMenuType != null
                     && (fieldType.equals(contextMenuType)
                         || fieldType.isAssignableFrom(contextMenuType)
@@ -1309,6 +1357,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     + (value == null ? " (null allowed)" : ""));
         }
 
+        log("source-exact repair: Runnable captures=" + runnableCaptureIndex);
         if (unresolved != 0) {
             lastRepairFailure =
                     "Supplier capture incomplete: "
@@ -3253,6 +3302,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     private static void log(String message) {
+        android.util.Log.i(TAG, message);
         XposedBridge.log(TAG + ": " + message);
     }
 }
