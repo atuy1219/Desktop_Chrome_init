@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 35
-        versionName = "0.4.16-diagnostics"
+        versionCode = 36
+        versionName = "0.4.17-diagnostics"
     }
 
     signingConfigs {
