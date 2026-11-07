@@ -48,7 +48,7 @@ final class NativeOmniboxPageCard {
             String title, String fullUrl, Bitmap favicon, TextView urlBar,
             boolean incognito) {
         try {
-            ViewGroup card = createFromChromeFactory(dropdown);
+            ViewGroup card = createChromeSuggestion(dropdown, EDIT_URL_SUGGESTION);
             if (card == null) {
                 info("native Omnibox factory not accessible");
                 return null;
@@ -182,7 +182,7 @@ final class NativeOmniboxPageCard {
                 : primary.getCurrentTextColor());
     }
 
-    private static void configureOriginalSuggestionDimensions(
+    static void configureOriginalSuggestionDimensions(
             ViewGroup view, Context context) {
         // Newly inflated BaseSuggestionView is unbound, so its four
         // SuggestionLayout dimensions start as zeros. This was why the
@@ -213,14 +213,14 @@ final class NativeOmniboxPageCard {
         info("native SuggestionLayout dimension binder R8-inaccessible");
     }
 
-    private static int dimension(Context ctx, String name, int fallbackDp) {
+    static int dimension(Context ctx, String name, int fallbackDp) {
         int id = id(ctx, name, "dimen");
         return id == 0
                 ? dp(ctx, fallbackDp)
                 : ctx.getResources().getDimensionPixelSize(id);
     }
 
-    private static void applyChromeCardSurface(
+    static void applyChromeCardSurface(
             FrameLayout wrapper, Activity activity, ViewGroup reference,
             boolean incognito) {
         // Chromium OmniboxResourceProvider.getStandardSuggestionBackgroundColor()
@@ -365,7 +365,7 @@ final class NativeOmniboxPageCard {
         return Math.round(units * context.getResources().getDisplayMetrics().density);
     }
 
-    private static ViewGroup createFromChromeFactory(ViewGroup dropdown)
+    static ViewGroup createChromeSuggestion(ViewGroup dropdown, int type)
             throws IllegalAccessException {
         Class<?> cls = dropdown.getClass();
         for (; cls != null && cls != View.class; cls = cls.getSuperclass()) {
@@ -385,7 +385,7 @@ final class NativeOmniboxPageCard {
                             || p[1] != int.class) continue;
                     try {
                         method.setAccessible(true);
-                        Object created = method.invoke(factory, dropdown, EDIT_URL_SUGGESTION);
+                        Object created = method.invoke(factory, dropdown, type);
                         if (created instanceof ViewGroup) {
                             ViewGroup row = (ViewGroup) created;
                             if (looksLikeNativeSuggestion(row)) return row;
