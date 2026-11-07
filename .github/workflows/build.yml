@@ -80,6 +80,15 @@ jobs:
           unzip -p "$APK" 'META-INF/xposed/native_init.list' \
             | grep -Fx 'libchrome_omnibox_probe.so'
 
+          # Packaging a .so is not enough: ensure the JNI and native_init
+          # exports are available and the Java bootstrap is in the DEX.
+          unzip -p "$APK" 'lib/arm64-v8a/libchrome_omnibox_probe.so' \
+            | strings | grep -F 'Java_com_atuy_desktopchromeinit_ChromeNativeProbe_nativeSnapshot'
+          unzip -p "$APK" 'lib/arm64-v8a/libchrome_omnibox_probe.so' \
+            | strings | grep -Fx 'JNI_OnLoad'
+          grep -F 'System.loadLibrary("chrome_omnibox_probe")' \
+            app/src/main/java/com/atuy/desktopchromeinit/ChromeNativeProbe.java
+
           cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
           ls -lh app/build/outputs/DesktopChromeInit-release.apk
 
