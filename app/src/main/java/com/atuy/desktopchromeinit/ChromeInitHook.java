@@ -2957,7 +2957,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                                 log("popup bridge: triggerPopup missing action ID");
                                 return;
                             }
-                            if (param.hasThrowable()) {
+                            if (param.getThrowable() != null) {
                                 log("popup bridge: triggerPopup failed before layout: "
                                         + stackSummary(param.getThrowable()));
                                 return;
