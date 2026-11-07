@@ -117,6 +117,26 @@ final class CurrentPageCardFix {
         }
     }
 
+    /**
+     * The first UI focus can race the package-version DEX survey. If the
+     * favicon accessor becomes available later, replace only a still-active,
+     * empty-input card. Never interrupt text entry or edit suggestions.
+     */
+    static void refreshAfterFaviconResolved() {
+        List<CardSession> active;
+        synchronized (SESSIONS) {
+            active = new ArrayList<>(SESSIONS.values());
+        }
+        for (CardSession session : active) {
+            if (session.card == null || !session.urlBar.hasFocus()
+                    || !TextUtils.isEmpty(session.urlBar.getText())) {
+                continue;
+            }
+            removeCard(session);
+            session.urlBar.postDelayed(() -> tryShow(session, 0), 45);
+        }
+    }
+
     private static boolean isChromeUrlBar(TextView view) {
         try {
             return TARGET_PACKAGE.equals(view.getContext().getPackageName())
