@@ -140,7 +140,7 @@ final class NativeOmniboxPageCard {
             // A native basic suggestion view with two lines is at least the
             // measured height of the same-class reference row.
             int minimum = Math.max(card.getMinimumHeight(),
-                    Math.round(56f * activity.getResources().getDisplayMetrics().density));
+                    dimension(activity, "omnibox_suggestion_content_height", 56));
             card.setMinimumHeight(minimum);
             finalCard.setContentDescription(title + " " + fullUrl);
             if (builtNativeButtons) {
@@ -251,6 +251,8 @@ final class NativeOmniboxPageCard {
             String fullUrl, TextView urlBar, TextView title,
             boolean incognito) {
         FrameLayout wrapper = new FrameLayout(activity);
+        wrapper.setMinimumHeight(dimension(
+                activity, "omnibox_suggestion_content_height", 56));
         applyChromeCardSurface(wrapper, activity, reference, incognito);
         int actionWidthId = id(activity, "omnibox_suggestion_action_button_width", "dimen");
         int actionWidth = actionWidthId == 0
