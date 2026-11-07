@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.lang.reflect.Method;
@@ -109,6 +111,10 @@ final class ChromeUiDiscovery {
             Log.i(TAG, "UI discovery: completed Chrome version=" + version
                     + " faviconAccessor=" + (favicon != null)
                     + " nativeOmniboxFactories=resolved-when-dropdown-attaches");
+            if (favicon != null) {
+                new Handler(Looper.getMainLooper()).post(
+                        CurrentPageCardFix::refreshAfterFaviconResolved);
+            }
         }, "ChromeUiDiscovery").start();
     }
 
