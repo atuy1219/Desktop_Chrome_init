@@ -128,6 +128,8 @@ final class NativeClipboardSuggestion {
             decoration.setVisibility(View.VISIBLE);
 
             FrameLayout wrapper = new FrameLayout(activity);
+            wrapper.setMinimumHeight(NativeOmniboxPageCard.dimension(
+                    activity, "omnibox_suggestion_content_height", 56));
             NativeOmniboxPageCard.applyChromeCardSurface(
                     wrapper, activity, nativeReference, false);
             int actionWidth = NativeOmniboxPageCard.dimension(
@@ -136,7 +138,7 @@ final class NativeClipboardSuggestion {
                     card.getPaddingEnd() + actionWidth, card.getPaddingBottom());
             wrapper.addView(card, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER_VERTICAL));
+                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL));
 
             ImageView eye = new ImageView(activity);
             eye.setClickable(true);
