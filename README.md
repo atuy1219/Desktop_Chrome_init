@@ -78,6 +78,43 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## v0.4.24: native favicon, card spacing and clipboard URL (TEST ONLY)
+
+Most-visited website tiles are deferred at the user's request.
+
+- Chromium 158 TabFavicon.getBitmapWithFallback(Tab, true) is the source
+  of the current tab favicon. A Chrome-version-keyed DEX scan resolves
+  its obfuscated static Bitmap(Tab, boolean) getter in a worker on the
+  first launch after each Chrome update. Only method descriptors are cached.
+  If the accessor is missing, show the default globe icon.
+- Chrome's unbound BaseSuggestionView must be initialized using the four
+  SuggestionLayout dimensions. Previously the zero-initialized dimensions
+  caused the favicon area and content to overlap the left edge.
+- Background color uses Chrome's own search_suggestion_bg_color resources,
+  with 16dp corners, 8dp side spacing and 20dp icons in 48dp action targets.
+- If Chrome has not produced a CLIPBOARD_SUGGESTION (type 5), a recent
+  HTTP(S) link copied within the last 3 minutes can be shown with the same
+  native view, initially concealed with Chrome's visibility-eye icon.
+  A clipboard fallback is never shown for an incognito or unverified profile.
+  Clipboard is accessed only after the address bar is focused, never during
+  startup; no URL, clipboard contents, history or title is logged or cached.
+  Any original Chrome clipboard suggestion takes priority over this fallback.
+- Startup discovery enumerates the known icon/dimension/resource anchors and
+  detects R8-renamed TabFavicon. The native Omnibox factory is discovered
+  from the actual running dropdown when it is attached (not at process boot).
+  This scoped discovery avoids a full-class enumeration on every launch.
+
+Native C++ zero-suggest candidate generation remains unchanged and the
+Google-signed Chrome APK is never modified. Bottom Bar automatic alignment
+from v0.4.21 is preserved. Keep PR #21 UNMERGED until device verification.
+
+Reference source files (Chromium 158.0.8127.22):
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/android/java/src/org/chromium/chrome/browser/tab/TabFavicon.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/base/SuggestionLayout.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/styles/OmniboxResourceProvider.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/clipboard/ClipboardSuggestionProcessor.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/components/open_from_clipboard/clipboard_recent_content.cc
+
 ## Native row retention when R8 optimizes action creation (v0.4.23 — TEST ONLY)
 
 The v0.4.22 device log shows that Chrome's genuine ViewHolder factory WORKED.
