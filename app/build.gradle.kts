@@ -10,8 +10,12 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 43
-        versionName = "0.4.24-native-favicon-clipboard"
+        versionCode = 44
+        versionName = "0.4.25-native-elf-probe"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     signingConfigs {
@@ -27,6 +31,12 @@ android {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("ci")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
         }
     }
 
