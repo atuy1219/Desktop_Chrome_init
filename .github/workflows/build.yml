@@ -45,6 +45,9 @@ jobs:
             exit 1
           fi
 
+      - name: Validate offline native-ELF analyzer
+        run: python -m py_compile tools/inspect_chrome_native.py
+
       - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
 
@@ -70,6 +73,12 @@ jobs:
           fi
 
           "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          # The native diagnostic must really be inside the signed module
+          # and declared to LSPosed; a compiled .so alone is not injection.
+          unzip -Z -1 "$APK" | grep -Fx 'lib/arm64-v8a/libchrome_omnibox_probe.so'
+          unzip -p "$APK" 'META-INF/xposed/native_init.list' \
+            | grep -Fx 'libchrome_omnibox_probe.so'
 
           cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
           ls -lh app/build/outputs/DesktopChromeInit-release.apk
