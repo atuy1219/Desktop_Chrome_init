@@ -34,6 +34,25 @@ Verified structurally against:
 
 Chrome 155/156 and later are intended to work without new mappings as long as Chromium keeps the same underlying Extensions/Toolbar architecture. A semantic Chromium refactor can still require a module change; no implementation can guarantee compatibility with arbitrary future code changes.
 
+## Unpinned Extensions popup fix (0.4.13)
+
+Chromium 158's `ExtensionsToolbarBridge.triggerPopup()` has the Java
+signature `(String, ExtensionActionPopupContents, boolean)`. The older
+module incorrectly attempted to hook `(String, long, boolean)`, so the
+popup width/temporary-anchor bridge could never be installed. Pinned
+actions worked because they already had a toolbar anchor; unpinned
+actions require a temporary popped-out anchor before the popup opens.
+
+The hook now selects the unique native callback by its stable method name
+and `(String, reference, boolean)` shape. The second parameter's actual
+R8-renamed reference type is discovered at runtime. It logs installation
+and each invoked action, allowing a direct check of the device behavior.
+
+Use `su -c 'logcat -d -v threadtime -b main -s DesktopChromeInit:V'`
+after force-stopping and relaunching Chrome. If recent logs have rotated,
+start continuous capture before reproducing the issue. This is a source-
+validated fix; live Chrome 158 testing is still required.
+
 ## Chrome 158 compatibility (0.4.12)
 
 Chromium 158 still dispatches the Extensions app-menu action through

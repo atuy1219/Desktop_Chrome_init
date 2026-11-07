@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.12-chrome158-input-extensions";
+    private static final String BUILD_MARKER = "0.4.13-chrome158-popup-signature";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -2915,26 +2915,65 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         try {
-            XposedHelpers.findAndHookMethod(
-                    bridgeClass,
-                    "triggerPopup",
-                    String.class,
-                    long.class,
-                    boolean.class,
+            // Chrome 158: triggerPopup(String, ExtensionActionPopupContents,
+            // boolean). The second parameter is a Java object, NOT a long JNI
+            // pointer. R8 may rename the contents class, so resolve it from
+            // the retained @CalledByNative method signature rather than a
+            // hard-coded class name.
+            Method target = null;
+            for (Method method : bridgeClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (!"triggerPopup".equals(method.getName())
+                        || parameters.length != 3
+                        || parameters[0] != String.class
+                        || parameters[1].isPrimitive()
+                        || parameters[2] != boolean.class
+                        || method.getReturnType() != void.class) {
+                    continue;
+                }
+                if (target != null) {
+                    log("popup bridge: ambiguous triggerPopup overloads; refusing to hook");
+                    return;
+                }
+                target = method;
+            }
+
+            if (target == null) {
+                log("popup bridge: triggerPopup(String, object, boolean) absent");
+                return;
+            }
+
+            target.setAccessible(true);
+            XposedBridge.hookMethod(
+                    target,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            String actionId = param.args != null
+                                            && param.args.length > 0
+                                            && param.args[0] instanceof String
+                                    ? (String) param.args[0] : null;
+                            if (actionId == null) {
+                                log("popup bridge: triggerPopup missing action ID");
+                                return;
+                            }
+                            if (param.getThrowable() != null) {
+                                log("popup bridge: triggerPopup failed before layout: "
+                                        + stackSummary(param.getThrowable()));
+                                return;
+                            }
+                            log("popup bridge: triggerPopup invoked for " + actionId);
                             try {
                                 rememberExtensionBridge(param.thisObject);
                                 forcePendingExtensionActionLayout(
-                                        param.thisObject,
-                                        (String) param.args[0]);
+                                        param.thisObject, actionId);
                             } catch (Throwable t) {
                                 log("popup width bridge failed: " + stackSummary(t));
                             }
                         }
                     });
-            log("installed ExtensionsToolbarBridge.triggerPopup width bridge");
+            log("installed ExtensionsToolbarBridge.triggerPopup width bridge; "
+                    + "contentsType=" + target.getParameterTypes()[1].getName());
         } catch (Throwable t) {
             log("could not hook ExtensionsToolbarBridge.triggerPopup: "
                     + stackSummary(t));
