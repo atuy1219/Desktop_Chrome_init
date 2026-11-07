@@ -78,6 +78,38 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## v0.4.26: native loader startup fix (DIAGNOSTIC ONLY)
+
+v0.4.25 compiled and packaged `libchrome_omnibox_probe.so` and declared
+`META-INF/xposed/native_init.list`, but omitted the Java-side native library
+load call. The on-device result was an entirely empty ChromeNativeOmnibox
+log, so the earlier APK CI verification was insufficient proof of native
+initialization. Modern libxposed/LSPosed supports that registration file,
+but Java loading is still explicitly performed from the module classloader.
+
+v0.4.26 calls `System.loadLibrary("chrome_omnibox_probe")` in the Chrome
+`onModuleLoaded` path, retrying at `onPackageLoaded`/`onPackageReady` if
+it fails. Every attempt logs success, failure and the responsible classloader.
+Native `JNI_OnLoad` separately logs when the ELF is actually loaded. Three
+read-only JNI snapshots sample loaded ELF modules at startup, +3s and +10s,
+including Chromium's `libmonochrome_64.so` naming variants. Each snapshot
+logs its matched library count and Build ID when available. It also says
+whether the LSPosed `native_init` callback actually arrived.
+
+This separates four cases:
+- no Java `ChromeNativeOmnibox` line: wrong APK or module not activated
+- `System.loadLibrary FAILED`: JNI module load/path/namespace failure
+- JNI snapshots work, `nativeInitRegistered=false`: Vector did not deliver
+  the native callback, but Java-started read-only ELF inventory still works
+- `nativeInitRegistered=true` and mapped Chromium ELF: ready for the next
+  symbol/offset verification stage; no inline hook is installed yet
+
+Run: `su -c 'am force-stop com.android.chrome'; su -c 'monkey -p
+com.android.chrome 1' >/dev/null; sleep 12; su -c 'logcat -d -v threadtime
+-b main' | grep -E 'ChromeNativeOmnibox|DesktopChromeInit: BOOT'`
+
+Do not merge PR #21 before explicit user approval and device verification.
+
 ## v0.4.25: Chrome ARM64 native Omnibox investigation (DIAGNOSTIC ONLY)
 
 Target: official Chrome Desktop Android 158.0.8127.22, preserving Google
