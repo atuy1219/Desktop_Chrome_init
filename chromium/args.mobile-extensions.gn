@@ -1,0 +1,15 @@
+# Chromium 158 proof-of-concept: Android phone UI with extensions core.
+#
+# Pass this file's contents to gn gen --args, or copy to out/.../args.gn.
+# This is a SOURCE BUILD, not an LSPosed configuration.
+# Upstream's default is enable_desktop_android_extensions=is_desktop_android.
+# Override it explicitly while preserving Android mobile build defaults.
+target_os = "android"
+target_cpu = "arm64"
+is_debug = false
+is_desktop_android = false
+enable_desktop_android_extensions = true
+
+# enable_extensions_core is derived as
+# enable_extensions || enable_desktop_android_extensions (true here).
+# Keep enable_extensions at its Android default (false).

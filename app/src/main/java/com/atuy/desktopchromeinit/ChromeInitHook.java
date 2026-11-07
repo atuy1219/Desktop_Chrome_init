@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.15-chrome158-popout-cleanup";
+    private static final String BUILD_MARKER = "0.4.27-native-bootstrap-diagnostics";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -129,6 +129,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         chromeClassLoader = lpparam.classLoader;
         log("loading " + BUILD_MARKER + " into " + lpparam.processName);
+        // Second independent entry point: this path has already been proven
+        // functional on Vector. Logs carry the same DesktopChromeInit tag as
+        // the existing module, so an empty native-only grep is diagnosable.
+        android.util.Log.e(TAG, "NATIVE_PROBE 0.4.27 ChromeInitHook entered");
+        try {
+            ChromeNativeProbe.start("ChromeInitHook.handleLoadPackage");
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "NATIVE_PROBE handleLoadPackage FAILED", t);
+        }
 
         // Vector/LSPosed variants can expose an incomplete or null
         // LoadPackageParam.appInfo during the early legacy callback. Never make
@@ -147,6 +156,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     loader = lpparam.classLoader;
                 }
                 chromeClassLoader = loader;
+                try {
+                    ChromeNativeProbe.startWithContext(
+                            current, "currentApplication");
+                } catch (Throwable t) {
+                    android.util.Log.e(TAG, "NATIVE_PROBE currentApplication FAILED", t);
+                }
                 initializeChromeHooks(
                         loader,
                         current.getApplicationInfo(),
@@ -230,6 +245,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             }
 
                             chromeClassLoader = loader;
+                            try {
+                                ChromeNativeProbe.startWithContext(
+                                        context, "Application.attach");
+                            } catch (Throwable t) {
+                                android.util.Log.e(TAG, "NATIVE_PROBE Application.attach FAILED", t);
+                            }
+                            // One package-version-keyed background DEX survey.
+                            // No clipboard reads or browsing data at startup.
+                            ChromeUiDiscovery.start(context);
                             initializeChromeHooks(
                                     loader,
                                     context.getApplicationInfo(),
@@ -258,10 +282,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // These hooks avoid changing DeviceInfo.isDesktop() for the process.
-        // They only affect Omnibox behavior on unsupported desktop-on-phone
-        // installs and do not depend on the Extensions DEX resolver.
-        ChromeInputCompatibility.install(classLoader);
+        // Desktop C++ builds suppress the active-page zero-prefix suggestion.
+        // Supply an Android-view current-page card without changing Chrome's
+        // Omnibox input, autocomplete candidates or platform identity.
+        CurrentPageCardFix.install();
+        Application activeChrome = getCurrentApplication();
+        if (activeChrome != null) ChromeUiDiscovery.start(activeChrome);
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier
@@ -2113,6 +2139,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 if (actionList != null) {
                     actionList.addOnLayoutChangeListener(listener);
                 }
+
+                // Native buttons change their padding as the Bottom Bar's
+                // measured height changes. Observe the actual layout rather
+                // than assuming a particular bottom_bar_height_dp value.
+                View reference = findNamedView(
+                        bottomBar,
+                        bottomBar.getResources(),
+                        "new_tab_button",
+                        "tab_switcher_button",
+                        "menu_button");
+                if (reference != null) {
+                    reference.addOnLayoutChangeListener(listener);
+                }
             }
 
             applyBottomBarEqualSlots(bottomBar, extensionsToolbar);
@@ -2268,8 +2307,75 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     }
                 }
             }
+
+            // Chromium BottomBarView.applyDynamicDimensions() uses padding to
+            // align native icons. The Extensions toolbar comes from
+            // extensions_toolbar_container.xml (tablet UI attributes), so
+            // MATCH_PARENT height alone is insufficient. Align the visual
+            // center of its menu glyph to a native icon, using measured
+            // coordinates and current padding. This supports 48/56/60 dp bars
+            // and any runtime toolbar-position/padding changes without
+            // reading or hardcoding the Finch flag parameter.
+            if (referenceButton != null && menuButton != null) {
+                bottomBar.post(() -> alignExtensionIconsToNativeButton(
+                        bottomBar, extensionsToolbar,
+                        referenceButton, menuButton));
+            }
         } catch (Throwable t) {
             log("bottom bar equal-slot apply failed: " + stackSummary(t));
+        }
+    }
+
+    private static void alignExtensionIconsToNativeButton(
+            LinearLayout bottomBar, LinearLayout extensionsToolbar,
+            View referenceButton, View menuButton) {
+        if (extensionsToolbar.getParent() != bottomBar
+                || bottomBar.getHeight() <= 0
+                || referenceButton.getHeight() <= 0
+                || menuButton.getHeight() <= 0
+                || !referenceButton.isShown()) {
+            return;
+        }
+
+        try {
+            int[] referencePosition = new int[2];
+            int[] menuPosition = new int[2];
+            referenceButton.getLocationInWindow(referencePosition);
+            menuButton.getLocationInWindow(menuPosition);
+
+            // Match center of the drawable's content box, not the midpoint
+            // of the View. BottomBarView dynamically changes its top/bottom
+            // padding when the bar is compact or its top inset is removed.
+            float referenceCenter = referencePosition[1]
+                    + (referenceButton.getHeight()
+                    + referenceButton.getPaddingTop()
+                    - referenceButton.getPaddingBottom()) / 2f;
+            float menuCenter = menuPosition[1]
+                    + (menuButton.getHeight()
+                    + menuButton.getPaddingTop()
+                    - menuButton.getPaddingBottom()) / 2f;
+
+            float oldTranslation = extensionsToolbar.getTranslationY();
+            float targetTranslation = oldTranslation + referenceCenter - menuCenter;
+
+            // A large displacement is evidence that the reference is in a
+            // different window/toolbar layout; do not jump the entire cluster
+            // across the screen on such a false positive.
+            float limit = bottomBar.getHeight() / 3f;
+            if (Math.abs(targetTranslation) > limit) {
+                return;
+            }
+            if (Math.abs(targetTranslation - oldTranslation) >= 0.5f) {
+                extensionsToolbar.setTranslationY(targetTranslation);
+                log("Bottom Bar glyph alignment: measuredHeightPx="
+                        + bottomBar.getHeight()
+                        + " referencePadding="
+                        + referenceButton.getPaddingTop() + "/"
+                        + referenceButton.getPaddingBottom()
+                        + " translationY=" + targetTranslation);
+            }
+        } catch (Throwable t) {
+            log("Bottom Bar glyph alignment failed: " + stackSummary(t));
         }
     }
 

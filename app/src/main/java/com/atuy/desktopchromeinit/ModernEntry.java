@@ -45,6 +45,13 @@ public final class ModernEntry extends XposedModule {
                 + " api=" + getApiVersion());
 
         if (TARGET_PACKAGE.equals(processName)) {
+            // native_init.list alone does not load a module ELF. Explicitly
+            // load it and report JNI availability before Chrome initialization.
+            try {
+                ChromeNativeProbe.start("onModuleLoaded");
+            } catch (Throwable failure) {
+                Log.e(TAG, "NATIVE_PROBE onModuleLoaded FAILED", failure);
+            }
             scheduleRetry(0L);
         }
     }
@@ -55,6 +62,11 @@ public final class ModernEntry extends XposedModule {
             return;
         }
 
+        try {
+            ChromeNativeProbe.start("onPackageLoaded");
+        } catch (Throwable failure) {
+            Log.e(TAG, "NATIVE_PROBE onPackageLoaded FAILED", failure);
+        }
         latestClassLoader = param.getDefaultClassLoader();
         latestApplicationInfo = param.getApplicationInfo();
         e("onPackageLoaded loader=" + latestClassLoader
@@ -68,6 +80,11 @@ public final class ModernEntry extends XposedModule {
             return;
         }
 
+        try {
+            ChromeNativeProbe.start("onPackageReady");
+        } catch (Throwable failure) {
+            Log.e(TAG, "NATIVE_PROBE onPackageReady FAILED", failure);
+        }
         latestClassLoader = param.getClassLoader();
         latestApplicationInfo = param.getApplicationInfo();
         e("onPackageReady loader=" + latestClassLoader

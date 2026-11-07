@@ -35,6 +35,19 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Enforce extensions-only mobile UX policy
+        run: |
+          set -euo pipefail
+          # Chrome's native phone UI must not be overwritten by the module.
+          # Check stable forbidden concepts rather than changing R8 symbols.
+          if grep -R -n -E 'ChromeInputCompatibility|hasDesktopExperience|isDebounceKeyboardVisibilityEnabled|DeviceInfo[.]isDesktop|IS_DESKTOP_ANDROID|FORCE_DESKTOP_ANDROID' app/src/main/java; then
+            echo 'Desktop/UI compatibility hook reintroduced; reject build'
+            exit 1
+          fi
+
+      - name: Validate offline native-ELF analyzer
+        run: python -m py_compile tools/inspect_chrome_native.py
+
       - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
 
@@ -60,6 +73,21 @@ jobs:
           fi
 
           "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          # The native diagnostic must really be inside the signed module
+          # and declared to LSPosed; a compiled .so alone is not injection.
+          unzip -Z -1 "$APK" | grep -Fx 'lib/arm64-v8a/libchrome_omnibox_probe.so'
+          unzip -p "$APK" 'META-INF/xposed/native_init.list' \
+            | grep -Fx 'libchrome_omnibox_probe.so'
+
+          # Packaging a .so is not enough: ensure the JNI and native_init
+          # exports are available and the Java bootstrap is in the DEX.
+          unzip -p "$APK" 'lib/arm64-v8a/libchrome_omnibox_probe.so' \
+            | strings | grep -F 'Java_com_atuy_desktopchromeinit_ChromeNativeProbe_nativeSnapshot'
+          unzip -p "$APK" 'lib/arm64-v8a/libchrome_omnibox_probe.so' \
+            | strings | grep -Fx 'JNI_OnLoad'
+          grep -F 'System.loadLibrary("chrome_omnibox_probe")' \
+            app/src/main/java/com/atuy/desktopchromeinit/ChromeNativeProbe.java
 
           cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
           ls -lh app/build/outputs/DesktopChromeInit-release.apk
