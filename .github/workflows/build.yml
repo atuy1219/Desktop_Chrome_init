@@ -35,6 +35,16 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Enforce extensions-only mobile UX policy
+        run: |
+          set -euo pipefail
+          # Chrome's native phone UI must not be overwritten by the module.
+          # Check stable forbidden concepts rather than changing R8 symbols.
+          if grep -R -n -E 'ChromeInputCompatibility|hasDesktopExperience|isDebounceKeyboardVisibilityEnabled|DeviceInfo\\.isDesktop|IS_DESKTOP_ANDROID|FORCE_DESKTOP_ANDROID' app/src/main/java; then
+            echo 'Desktop/UI compatibility hook reintroduced; reject build'
+            exit 1
+          fi
+
       - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
 
