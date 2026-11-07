@@ -199,14 +199,14 @@ final class CurrentPageCardFix {
                     activity, (ViewGroup) dropdown,
                     page.title, page.url, page.favicon, session.urlBar);
             if (session.card == null) {
-                // Official Chrome may optimize the ViewHolder factory away.
+                // If no native suggestion view can be constructed, use the fallback.
                 // Keep the feature usable, but copy the actual suggestion
                 // colors/background rather than applying unrelated Android
                 // Activity-theme colors (which were illegible in dark mode).
                 session.card = buildCard(activity, session, page);
                 NativeOmniboxPageCard.styleLegacyFallback(
                         (ViewGroup) dropdown, session.card);
-                Log.i(TAG, "Current-page card: native factory unavailable; "
+                Log.i(TAG, "Current-page card: native row unavailable; "
                         + "styled fallback based on Chrome's own suggestion row");
             }
             session.card.measure(
