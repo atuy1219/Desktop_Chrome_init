@@ -41,6 +41,26 @@ final class ChromeUiDiscovery {
         final SharedPreferences prefs = application.getSharedPreferences(
                 PREF, Context.MODE_PRIVATE);
 
+        // Stable Android resource identifiers are the strongest anchors for
+        // Chrome's R8-independent Omnibox UI. Survey only public identifiers
+        // at startup; never instantiate internal models during startup.
+        String[] requiredIds = {
+                "omnibox_suggestions_dropdown", "line_1", "line_2"
+        };
+        String[] requiredDrawables = {
+                "ic_share_white_24dp", "ic_content_copy",
+                "ic_edit_24dp", "ic_visibility_black", "ic_globe_24dp"
+        };
+        String[] requiredDimens = {
+                "omnibox_suggestion_side_spacing_smallest",
+                "omnibox_suggestion_content_height",
+                "omnibox_suggestion_action_button_width",
+                "omnibox_suggestion_bg_round_corner_radius"
+        };
+        reportResourceCategory(application, "id", requiredIds);
+        reportResourceCategory(application, "drawable", requiredDrawables);
+        reportResourceCategory(application, "dimen", requiredDimens);
+
         final long version;
         try {
             PackageInfo info = application.getPackageManager()
@@ -84,6 +104,21 @@ final class ChromeUiDiscovery {
                     + " faviconAccessor=" + (favicon != null)
                     + " nativeOmniboxFactories=resolved-when-dropdown-attaches");
         }, "ChromeUiDiscovery").start();
+    }
+
+    private static void reportResourceCategory(
+            Context ctx, String type, String[] names) {
+        int available = 0;
+        for (String name : names) {
+            if (ctx.getResources().getIdentifier(
+                    name, type, "com.android.chrome") != 0) {
+                available++;
+            } else {
+                Log.i(TAG, "UI discovery: resource absent " + type + "/" + name);
+            }
+        }
+        Log.i(TAG, "UI discovery: resource type=" + type
+                + " resolved=" + available + "/" + names.length);
     }
 
     static Bitmap currentFavicon(Object tab, ClassLoader loader) {
