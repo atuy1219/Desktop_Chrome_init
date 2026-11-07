@@ -1,6 +1,7 @@
 #define _GNU_SOURCE 1
 
 #include <android/log.h>
+#include <jni.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
@@ -39,6 +40,7 @@ typedef struct {
 static const NativeAPIEntries *g_native_api = NULL;
 static bool g_logged_module = false;
 static bool g_logged_chromium = false;
+static unsigned int g_last_snapshot_matches = 0;
 
 static bool is_chrome_process(void) {
     char name[128] = {0};
@@ -52,7 +54,11 @@ static bool is_chrome_process(void) {
 
 static bool chromium_so_name(const char *name) {
     if (name == NULL) return false;
-    return strstr(name, "libmonochrome.so") != NULL
+    // Official Chrome can load a variant such as libmonochrome_64.so.
+    // Avoid matching OUR module libchrome_omnibox_probe.so by requiring
+    // an exact libchrome.so token.
+    return strstr(name, "libmonochrome") != NULL
+            || strstr(name, "libtrichrome") != NULL
             || strstr(name, "libchrome.so") != NULL
             || strstr(name, "libchromium.so") != NULL;
 }
@@ -120,6 +126,7 @@ static int inspect_elf(struct dl_phdr_info *info,
         if (build_id[0]) break;
     }
 
+    ++g_last_snapshot_matches;
     __android_log_print(ANDROID_LOG_INFO, TAG,
             "mapped=%s base=0x%llx buildId=%s phdrCount=%u",
             info->dlpi_name, (unsigned long long)info->dlpi_addr,
@@ -168,4 +175,37 @@ LibraryLoadedCallback native_init(const NativeAPIEntries *api) {
                 (long)getpid());
     }
     return on_library_loaded;
+}
+
+/*
+ * This JNI entry point is intentionally separate from native_init().
+ * Calling it from libxposed Java on Chrome startup proves the .so was loaded
+ * even if Vector's native_init.list callback wasn't invoked. It never hooks
+ * functions or writes Chromium executable pages.
+ */
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)vm;
+    (void)reserved;
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+            "JNI_OnLoad reached pid=%ld nativeInitRegistered=%s",
+            (long)getpid(), g_native_api ? "true" : "false");
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL
+Java_com_atuy_desktopchromeinit_ChromeNativeProbe_nativeSnapshot(
+        JNIEnv *env, jclass cls, jint phase) {
+    (void)env;
+    (void)cls;
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+            "ELF snapshot START phase=%d pid=%ld nativeInitRegistered=%s"
+            " processIsChrome=%s",
+            phase, (long)getpid(),
+            g_native_api ? "true" : "false",
+            is_chrome_process() ? "true" : "false");
+    g_last_snapshot_matches = 0;
+    dl_iterate_phdr(inspect_elf, NULL);
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+            "ELF snapshot END phase=%d matches=%u",
+            phase, g_last_snapshot_matches);
 }
