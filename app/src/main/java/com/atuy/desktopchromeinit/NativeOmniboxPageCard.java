@@ -10,8 +10,11 @@ import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
 import android.util.Log;
 import android.view.View;
+import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -74,6 +77,7 @@ final class NativeOmniboxPageCard {
 
             ViewGroup nativeReference = findReferenceRow(dropdown, card.getClass());
             if (nativeReference != null) {
+                applyChromeSuggestionColors(nativeReference, first, second);
                 // SuggestionLayout's 4 sizing fields are initialized through
                 // BaseSuggestionViewBinder in ordinary suggestions. Copy
                 // layout primitives from an already-bound native row of the
@@ -89,9 +93,18 @@ final class NativeOmniboxPageCard {
                 }
             }
 
-            if (!createNativeActions(card, activity, fullUrl, urlBar, first)) {
-                info("native action buttons could not be configured");
-                return null;
+            boolean builtNativeButtons = createNativeActions(
+                    card, activity, fullUrl, urlBar, first);
+            ViewGroup finalCard = card;
+            if (!builtNativeButtons) {
+                // R8 can inline/reshape both the action-list builder and its
+                // private LayoutParams factory. Keep Chromium's native
+                // BaseSuggestionView content and normal suggestion colors.
+                // Only the ACTION_BUTTON container is supplied externally.
+                finalCard = wrapWithChromeStyleActions(
+                        activity, card, nativeReference, fullUrl, urlBar, first);
+                info("native BaseSuggestionView kept; action buttons use "
+                        + "measured native-layout overlay");
             }
 
             // The native EditUrlSuggestionProcessor sets its decoration to
@@ -115,13 +128,143 @@ final class NativeOmniboxPageCard {
             int minimum = Math.max(card.getMinimumHeight(),
                     Math.round(56f * activity.getResources().getDisplayMetrics().density));
             card.setMinimumHeight(minimum);
-            card.setContentDescription(title + " " + fullUrl);
-            info("using original Chromium EDIT_URL_SUGGESTION BaseSuggestionView");
-            return card;
+            finalCard.setContentDescription(title + " " + fullUrl);
+            if (builtNativeButtons) {
+                info("using original Chromium EDIT_URL_SUGGESTION "
+                        + "BaseSuggestionView with native ACTION_BUTTON layout");
+            } else {
+                info("using original Chromium EDIT_URL_SUGGESTION "
+                        + "BaseSuggestionView with external action overlay");
+            }
+            return finalCard;
         } catch (Throwable error) {
             Log.w(TAG, "Current-page card native rendering failed", error);
             return null;
         }
+    }
+
+    private static void applyChromeSuggestionColors(
+            ViewGroup reference, TextView title, TextView url) {
+        List<TextView> referenceLines = new ArrayList<>();
+        collectTextViews(reference, referenceLines, 0);
+        if (referenceLines.isEmpty()) return;
+        // A native bound Omnibox row has already run SuggestionViewViewBinder,
+        // including Chrome's dark/incognito URL colors. Never resolve these
+        // colors from the Android Activity theme.
+        title.setTextColor(referenceLines.get(0).getCurrentTextColor());
+        url.setTextColor(referenceLines.size() > 1
+                ? referenceLines.get(1).getCurrentTextColor()
+                : referenceLines.get(0).getCurrentTextColor());
+    }
+
+    private static ViewGroup wrapWithChromeStyleActions(
+            Activity activity, ViewGroup chromeRow, ViewGroup reference,
+            String fullUrl, TextView urlBar, TextView title) {
+        FrameLayout wrapper = new FrameLayout(activity);
+        int actionWidthId = id(activity, "omnibox_suggestion_action_button_width", "dimen");
+        int actionWidth = actionWidthId == 0
+                ? dp(activity, 48)
+                : activity.getResources().getDimensionPixelSize(actionWidthId);
+        if (actionWidth < dp(activity, 32) || actionWidth > dp(activity, 80)) {
+            actionWidth = dp(activity, 48);
+        }
+        final int reservedWidth = 3 * actionWidth;
+        chromeRow.setPaddingRelative(
+                chromeRow.getPaddingStart(), chromeRow.getPaddingTop(),
+                chromeRow.getPaddingEnd() + reservedWidth,
+                chromeRow.getPaddingBottom());
+        FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+        wrapper.addView(chromeRow, rowParams);
+
+        LinearLayout buttons = new LinearLayout(activity);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        buttons.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout.LayoutParams buttonsParams = new FrameLayout.LayoutParams(
+                reservedWidth, ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.END | Gravity.CENTER_VERTICAL);
+
+        final String[] names = {
+                "ic_share_white_24dp", "ic_content_copy", "ic_edit_24dp"
+        };
+        final int[] fallbackIcons = {
+                android.R.drawable.ic_menu_share,
+                android.R.drawable.ic_menu_save,
+                android.R.drawable.ic_menu_edit
+        };
+        final String[] labelsJa = {"共有", "コピー", "編集"};
+        final String[] labelsEn = {"Share", "Copy", "Edit"};
+        Runnable[] handlers = {
+                () -> {
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType("text/plain");
+                    send.putExtra(Intent.EXTRA_TEXT, fullUrl);
+                    activity.startActivity(Intent.createChooser(send, null));
+                },
+                () -> {
+                    ClipboardManager cb = (ClipboardManager)
+                            activity.getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cb != null) {
+                        cb.setPrimaryClip(ClipData.newPlainText("URL", fullUrl));
+                    }
+                },
+                () -> {
+                    if (urlBar instanceof EditText) {
+                        EditText editor = (EditText) urlBar;
+                        editor.setText(fullUrl);
+                        editor.setSelection(editor.length());
+                    }
+                }
+        };
+        boolean ja = "ja".equals(activity.getResources()
+                .getConfiguration().getLocales().get(0).getLanguage());
+        int foreground = id(activity, "action_button_foreground_selector", "drawable");
+
+        for (int i = 0; i < 3; i++) {
+            ImageView button = instantiateChromeActionButton(reference, activity);
+            if (button == null) button = new ImageView(activity);
+            button.setClickable(true);
+            button.setFocusable(true);
+            button.setScaleType(ImageView.ScaleType.CENTER);
+            if (foreground != 0) {
+                button.setForeground(activity.getDrawable(foreground));
+            }
+            int icon = id(activity, names[i], "drawable");
+            button.setImageResource(icon == 0 ? fallbackIcons[i] : icon);
+            button.setImageTintList(
+                    ColorStateList.valueOf(title.getCurrentTextColor()));
+            button.setContentDescription(ja ? labelsJa[i] : labelsEn[i]);
+            final Runnable callback = handlers[i];
+            button.setOnClickListener(view -> callback.run());
+            buttons.addView(button, new LinearLayout.LayoutParams(
+                    actionWidth, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        wrapper.addView(buttons, buttonsParams);
+        return wrapper;
+    }
+
+    private static ImageView instantiateChromeActionButton(
+            ViewGroup nativeReference, Activity activity) {
+        if (nativeReference == null) return null;
+        // Source: the first three children are favicon, chip footer, content.
+        // Remaining ImageViews on an already-bound native suggestion are
+        // Chromium ActionButtonView instances, which have Context ctor.
+        for (int i = 3; i < nativeReference.getChildCount(); i++) {
+            View item = nativeReference.getChildAt(i);
+            if (!(item instanceof ImageView)) continue;
+            try {
+                Constructor<?> ctor = item.getClass().getDeclaredConstructor(Context.class);
+                ctor.setAccessible(true);
+                Object instance = ctor.newInstance(activity);
+                if (instance instanceof ImageView) return (ImageView) instance;
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private static int dp(Context context, int units) {
+        return Math.round(units * context.getResources().getDisplayMetrics().density);
     }
 
     private static ViewGroup createFromChromeFactory(ViewGroup dropdown)
