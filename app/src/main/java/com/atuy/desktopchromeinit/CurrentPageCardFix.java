@@ -75,7 +75,7 @@ final class CurrentPageCardFix {
         final String displayBeforeFocus;
         ViewGroup dropdown;
         FrameLayout suggestionContainer;
-        LinearLayout card;
+        ViewGroup card;
         int baselineTopPadding;
         int cardHeight;
         android.view.ViewTreeObserver.OnPreDrawListener layoutObserver;
@@ -195,7 +195,20 @@ final class CurrentPageCardFix {
             session.dropdown = (ViewGroup) dropdown;
             session.suggestionContainer = (FrameLayout) dropdown.getParent();
             session.baselineTopPadding = dropdown.getPaddingTop();
-            session.card = buildCard(activity, session, page);
+            session.card = NativeOmniboxPageCard.build(
+                    activity, (ViewGroup) dropdown,
+                    page.title, page.url, page.favicon, session.urlBar);
+            if (session.card == null) {
+                // Official Chrome may optimize the ViewHolder factory away.
+                // Keep the feature usable, but copy the actual suggestion
+                // colors/background rather than applying unrelated Android
+                // Activity-theme colors (which were illegible in dark mode).
+                session.card = buildCard(activity, session, page);
+                NativeOmniboxPageCard.styleLegacyFallback(
+                        (ViewGroup) dropdown, session.card);
+                Log.i(TAG, "Current-page card: native factory unavailable; "
+                        + "styled fallback based on Chrome's own suggestion row");
+            }
             session.card.measure(
                     View.MeasureSpec.makeMeasureSpec(dropdown.getWidth(),
                             View.MeasureSpec.EXACTLY),
