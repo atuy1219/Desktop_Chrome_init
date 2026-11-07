@@ -80,6 +80,17 @@ validated fix; live Chrome 158 testing is still required.
 
 ## Extension-only mobile experience (unmerged test, 0.4.20)
 
+> **Known failure on Chrome 158 Desktop APK:** v0.4.20 does **not** restore
+> the native current-page URL card. The native
+> `ZeroSuggestVerbatimMatchProvider::IsVerbatimMatchEligible()` returns
+> `false` for regular page contexts whenever
+> `BUILDFLAG(IS_DESKTOP_ANDROID)` is true. Removing Java Omnibox hooks does
+> not undo this native build-time gate. See
+> [mobile Chromium + extensions build proposal](docs/CHROMIUM_MOBILE_EXTENSIONS.md).
+> PR #21 must remain unmerged pending a real fix and device verification.
+
+
+
 **Purpose:** use Chrome Desktop Android's compiled extension engine while
 leaving the phone's normal Chrome UI and input behaviors untouched.
 
