@@ -78,6 +78,29 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## Native row retention when R8 optimizes action creation (v0.4.23 — TEST ONLY)
+
+The v0.4.22 device log shows that Chrome's genuine ViewHolder factory WORKED.
+The error came from creating three action buttons, not from constructing
+the Chrome suggestion row. Therefore v0.4.23 never discards a genuine
+BaseSuggestionView merely because its R8-optimized action builder is
+inaccessible. The original dark/light Chrome content, typography, dimensions
+and background remain. Only the three action buttons are placed in a
+right-aligned transparent overlay when their native LayoutParams are
+unavailable. The width is read from Chrome's actual
+`omnibox_suggestion_action_button_width` dimension; each icon is drawn
+with Chrome's own drawable and action foreground and, when possible,
+an instance of the real ActionButtonView discovered from a live row.
+
+Expected log if R8 prevents direct action creation:
+
+    Current-page card native: native BaseSuggestionView kept; action buttons use measured native-layout overlay
+    Current-page card native: using original Chromium EDIT_URL_SUGGESTION BaseSuggestionView with external action overlay
+
+The old independent two-row card is now a final fallback ONLY for failure
+to construct the native suggestion view. v0.4.23 remains test-only; check
+native-like horizontal icon layout, theme contrast, sharing, copy, edit and IME.
+
 ## Chromium native current-page view reuse (v0.4.22 — TEST ONLY)
 
 The v0.4.21 custom overlay made text and controls too dark and had an
