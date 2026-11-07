@@ -145,16 +145,27 @@ final class NativeOmniboxPageCard {
 
     private static void applyChromeSuggestionColors(
             ViewGroup reference, TextView title, TextView url) {
-        List<TextView> referenceLines = new ArrayList<>();
-        collectTextViews(reference, referenceLines, 0);
-        if (referenceLines.isEmpty()) return;
-        // A native bound Omnibox row has already run SuggestionViewViewBinder,
-        // including Chrome's dark/incognito URL colors. Never resolve these
-        // colors from the Android Activity theme.
-        title.setTextColor(referenceLines.get(0).getCurrentTextColor());
-        url.setTextColor(referenceLines.size() > 1
-                ? referenceLines.get(1).getCurrentTextColor()
-                : referenceLines.get(0).getCurrentTextColor());
+        // The Chrome-native layout explicitly declares R.id.line_1 and
+        // R.id.line_2. Prefer those stable resource IDs over indiscriminately
+        // walking ActionChipsView descendants, which can contain unrelated
+        // text nodes and use unrelated colors.
+        int firstId = id(reference.getContext(), "line_1");
+        int secondId = id(reference.getContext(), "line_2");
+        View first = firstId == 0 ? null : reference.findViewById(firstId);
+        View second = secondId == 0 ? null : reference.findViewById(secondId);
+        TextView primary = first instanceof TextView ? (TextView) first : null;
+        TextView secondary = second instanceof TextView ? (TextView) second : null;
+        if (primary == null) {
+            List<TextView> lines = new ArrayList<>();
+            collectTextViews(reference, lines, 0);
+            if (lines.isEmpty()) return;
+            primary = lines.get(0);
+            if (lines.size() > 1) secondary = lines.get(1);
+        }
+        title.setTextColor(primary.getCurrentTextColor());
+        url.setTextColor(secondary != null
+                ? secondary.getCurrentTextColor()
+                : primary.getCurrentTextColor());
     }
 
     private static ViewGroup wrapWithChromeStyleActions(
@@ -241,6 +252,8 @@ final class NativeOmniboxPageCard {
                     actionWidth, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         wrapper.addView(buttons, buttonsParams);
+        info("action overlay widthPerButtonPx=" + actionWidth
+                + " sourceChromeSuggestion=" + (reference != null));
         return wrapper;
     }
 
