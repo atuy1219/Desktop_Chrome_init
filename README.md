@@ -78,6 +78,30 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## Omnibox URL/keyboard diagnosis (unmerged PR, 0.4.16-diagnostics)
+
+The existing Chrome 158 `hasDesktopExperience(Context)` override does not
+directly preserve the URL; it changes Omnibox feature selection. The existing
+keyboard-debounce override may interact with Chromium's accessibility
+focus workaround and is not proof that IME behavior is repaired.
+
+A read-only diagnostic hook on `UrlBar.onFocusChanged()` records only text
+length, focus, window-focus, visibility, and IME visibility. A TextWatcher
+logs length transitions to distinguish an empty editor model from an empty
+view after focusing. **No URL, query, or typed text is collected**.
+
+To reproduce, capture logcat before tapping the address bar:
+
+```sh
+su -c 'logcat -c'
+su -c 'logcat -v threadtime -b main -s DesktopChromeInit:V' > chrome_omnibox_trace.log
+```
+
+Navigate to a normal HTTPS page, focus the URL bar once, then terminate
+the logcat command. Examine `URLBAR focus-before`, `URLBAR text length`,
+and `URLBAR focus-after-200ms`. This PR is diagnostic only: no behavior
+change or claim of a working fix. Do not merge before testing.
+
 ## Chrome 158 compatibility (0.4.12)
 
 Chromium 158 still dispatches the Extensions app-menu action through
