@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.15-chrome158-popout-cleanup";
+    private static final String BUILD_MARKER = "0.4.20-extensions-only-mobile-ui";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -258,10 +258,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // These hooks avoid changing DeviceInfo.isDesktop() for the process.
-        // They only affect Omnibox behavior on unsupported desktop-on-phone
-        // installs and do not depend on the Extensions DEX resolver.
-        ChromeInputCompatibility.install(classLoader);
+        // Extension-only policy: do not hook the native mobile Omnibox,
+        // keyboard, back gestures or Chrome's platform identity. The Desktop
+        // APK is used solely to expose its built-in extensions subsystem.
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier
