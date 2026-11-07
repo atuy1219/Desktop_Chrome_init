@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 45
-        versionName = "0.4.26-native-jni-bootstrap"
+        versionCode = 46
+        versionName = "0.4.27-native-bootstrap-diagnostics"
 
         ndk {
             abiFilters += "arm64-v8a"
