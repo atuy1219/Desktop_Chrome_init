@@ -146,6 +146,13 @@ public final class ProbeEntry extends XposedModule {
 
         int snapshot = reports.incrementAndGet();
         emit("SNAPSHOT_BEGIN", "index=" + snapshot + " trigger=" + origin, "DIRECT");
+        if (snapshot == 1) {
+            emit("classLoader.chrome", chromeLoader == null
+                    ? "null" : chromeLoader.getClass().getName(), "DIAGNOSTIC");
+            emit("classLoader.context", ctx.getClassLoader() == null
+                    ? "null" : ctx.getClassLoader().getClass().getName(),
+                    "DIAGNOSTIC");
+        }
 
         try {
             PackageInfo info = ctx.getPackageManager().getPackageInfo(CHROME, 0);
@@ -282,6 +289,26 @@ public final class ProbeEntry extends XposedModule {
             emit("DERIVED.hasPrecisionPointerExperience",
                     desktop || (tablet && pointer), evidence);
             emit("DERIVED.areAnimationsEnabled", !desktop, evidence);
+        } else if (!hasPcFeature && tablet != null && keyboard != null
+                && pointer != null) {
+            // DeviceInfo.isDesktop() in Chromium 158:
+            // (IS_DESKTOP_ANDROID && FEATURE_PC) || --force-desktop-android.
+            // FEATURE_PC is false, hence the build-time term is provably false.
+            // CommandLine is itself R8-hidden, so the forced switch must be
+            // checked separately. Do NOT claim the condition as a direct value.
+            String assumed = "CONDITIONAL_NO_FORCE_DESKTOP_SWITCH";
+            emit("DERIVED.DeviceInfo.isDesktop()",
+                    "false IF --force-desktop-android is absent", assumed);
+            emit("DERIVED.hasDesktopExperience",
+                    (tablet && keyboard && pointer)
+                    + " IF --force-desktop-android is absent", assumed);
+            emit("DERIVED.isDesktopPlatform",
+                    "false IF --force-desktop-android is absent", assumed);
+            emit("DERIVED.hasPrecisionPointerExperience",
+                    (tablet && pointer)
+                    + " IF --force-desktop-android is absent", assumed);
+            emit("DERIVED.areAnimationsEnabled",
+                    "true IF --force-desktop-android is absent", assumed);
         } else {
             emit("DERIVED.hasDesktopExperience",
                     "UNKNOWN: DeviceInfo.isDesktop or input evidence inaccessible",
@@ -346,7 +373,8 @@ public final class ProbeEntry extends XposedModule {
             Field field = cls.getDeclaredField(fieldName);
             field.setAccessible(true);
             return field.get(null);
-        } catch (Throwable ignored) {
+        } catch (Throwable error) {
+            reportReflectionFailure(className + "." + fieldName, error);
             return null;
         }
     }
@@ -358,9 +386,20 @@ public final class ProbeEntry extends XposedModule {
             Method method = cls.getDeclaredMethod(name, parameterTypes);
             method.setAccessible(true);
             return method.invoke(null, arguments);
-        } catch (Throwable ignored) {
+        } catch (Throwable error) {
+            reportReflectionFailure(className + "." + name + "()", error);
             return null;
         }
+    }
+
+    private void reportReflectionFailure(String method, Throwable error) {
+        // Report once: previously every reflection failure was swallowed,
+        // making an R8 class rename indistinguishable from a method mismatch.
+        if (reports.get() != 1) return;
+        Throwable cause = error;
+        if (error instanceof java.lang.reflect.InvocationTargetException
+                && error.getCause() != null) cause = error.getCause();
+        emit("REFLECTION_FAILURE " + method, shortError(cause), "DIAGNOSTIC");
     }
 
     private Class<?> findClass(String name) throws ClassNotFoundException {
