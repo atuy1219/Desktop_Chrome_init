@@ -95,25 +95,24 @@ final class ChromeInputCompatibility {
     }
 
     /**
-     * Diagnosis only. Track the actual text-view transitions instead of
-     * assuming that a desktop-capability or keyboard-debounce flag controls
-     * URL persistence. Never log the URL, typed content or suggestion text.
+     * Trace the Chrome URL editor without referring to its obfuscated class.
      *
-     * UrlBar.onFocusChanged() overrides an Android framework method, so its
-     * signature is stable even if other Omnibox internals change under R8.
+     * Chrome 158 R8 renames org.chromium.chrome.browser.omnibox.UrlBar in the
+     * release DEX. Its superclass chain still invokes Android's TextView
+     * onFocusChanged(boolean, int, Rect), and the view retains R.id.url_bar.
+     * Filter at the stable resource ID before doing any work.
      */
     private static void installUrlBarTrace(ClassLoader loader) {
         if (urlBarTraceHooked) return;
         try {
-            Class<?> cls = Class.forName(
-                    "org.chromium.chrome.browser.omnibox.UrlBar", false, loader);
-            Method method = cls.getDeclaredMethod(
+            Method method = TextView.class.getDeclaredMethod(
                     "onFocusChanged", boolean.class, int.class, Rect.class);
             XposedBridge.hookMethod(method, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (!(param.thisObject instanceof TextView)) return;
                     TextView urlBar = (TextView) param.thisObject;
+                    if (!isChromeUrlBar(urlBar)) return;
                     attachTextTrace(urlBar);
                     logUrlBarState("focus-before", urlBar);
                 }
@@ -122,6 +121,7 @@ final class ChromeInputCompatibility {
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (!(param.thisObject instanceof TextView)) return;
                     TextView urlBar = (TextView) param.thisObject;
+                    if (!isChromeUrlBar(urlBar)) return;
                     logUrlBarState("focus-after", urlBar);
                     urlBar.post(() -> logUrlBarState("focus-next-frame", urlBar));
                     urlBar.postDelayed(
@@ -129,9 +129,21 @@ final class ChromeInputCompatibility {
                 }
             });
             urlBarTraceHooked = true;
-            log("Omnibox UrlBar focus/length trace installed (no URL text collected)");
+            log("Omnibox URLBAR framework focus hook installed; filtered by R.id.url_bar");
         } catch (Throwable t) {
-            log("Omnibox UrlBar focus trace unavailable: " + t);
+            log("Omnibox URLBAR framework focus hook unavailable: " + t);
+        }
+    }
+
+    private static boolean isChromeUrlBar(TextView view) {
+        if (view.getId() == View.NO_ID) return false;
+        try {
+            Context context = view.getContext();
+            if (context == null || !TARGET.equals(context.getPackageName())) return false;
+            int id = context.getResources().getIdentifier("url_bar", "id", TARGET);
+            return id != 0 && view.getId() == id;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
