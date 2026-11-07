@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.14-chrome158-popup-dismiss";
+    private static final String BUILD_MARKER = "0.4.15-chrome158-popout-cleanup";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -74,12 +74,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final Map<View, Integer> TEMP_POPOUT_BASE_ACTION_COUNTS =
-            Collections.synchronizedMap(new WeakHashMap<>());
-
-    // Identity of the popup contents supplied by the native bridge. Only a
-    // temporary (unpinned) action is registered here. The entry is consumed
-    // when Chrome constructs the corresponding ExtensionActionPopup.
-    private static final Map<Object, Boolean> UNPINNED_POPUP_CONTENTS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final Map<View, Boolean> CUSTOM_TAB_LAYOUT_HOOKS =
@@ -312,8 +306,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
 
             installExtensionPopupWidthBridge(classLoader);
-            installExtensionPopupDismissCleanup(classLoader);
-            installUnpinnedExtensionPopupOutsideDismiss(classLoader);
+            installTemporaryPopupDismissReconcile();
 
             featureHooksInstalled = true;
             log(origin + ": full Chrome hooks installed");
@@ -2831,160 +2824,51 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Popup dismissal calls ExtensionActionListMediator.closePopup(), which in
-     * turn calls undoPopout(). On a real Desktop/Tablet toolbar the following
-     * toolbar-width pass reconciles the model and removes the temporary action.
-     * ToolbarPhone never performs that pass.
+     * A temporary (unpinned) extension action is popped out by Chromium in
+     * ExtensionActionListMediator.requestActionVisibility(). Closing the popup
+     * clears mPoppedOutActionId via undoPopout(), but ToolbarPhone has no
+     * desktop width-consumer pass that reconciles the action RecyclerView.
      *
-     * Hook ExtensionActionPopup.destroy() and post one task so closePopup() can
-     * finish undoPopout() first. Then re-run the bridge observer notification,
-     * which causes reconcileActionItems() and removes the temporary icon.
-     */
-    /**
-     * Chromium builds ExtensionActionPopup using AnchoredPopupWindow with
-     * setOutsideTouchable(true), but the shared AnchoredPopupWindow builder
-     * defaults to setTouchModal(false). On some phone/window-manager layouts,
-     * outside taps then pass to Chrome rather than closing the popup.
+     * ExtensionActionPopup.destroy() is not a stable R8 hook target. Observe
+     * Android's PopupWindow.dismiss() instead and wait until Chrome has
+     * completed its original dismissal callbacks. The native-facing
+     * ExtensionsToolbarBridge methods below are kept by @CalledByNative.
      *
-     * Only change popups opened through an unpinned temporary toolbar anchor.
-     * The popup contents object is the same object passed to triggerPopup().
-     * Normal pinned popups and DevTools inspection are left unchanged.
+     * Do not change popup touch handling. Other Chrome popups are ignored
+     * unless a temporary action is currently being tracked.
      */
-    private static void installUnpinnedExtensionPopupOutsideDismiss(ClassLoader classLoader) {
-        Class<?> popupClass = XposedHelpers.findClassIfExists(
-                "org.chromium.chrome.browser.toolbar.extensions.ExtensionActionPopup",
-                classLoader);
-        if (popupClass == null) {
-            log("unpinned popup dismissal: ExtensionActionPopup unavailable");
-            return;
-        }
+    private static void installTemporaryPopupDismissReconcile() {
         try {
-            int installed = 0;
-            for (java.lang.reflect.Constructor<?> constructor
-                    : popupClass.getDeclaredConstructors()) {
-                Class<?>[] parameters = constructor.getParameterTypes();
-                if (parameters.length != 9
-                        || parameters[0] != Activity.class
-                        || parameters[3] != String.class
-                        || parameters[8] != boolean.class) {
-                    continue;
+            Method dismiss = android.widget.PopupWindow.class
+                    .getDeclaredMethod("dismiss");
+            XposedBridge.hookMethod(dismiss, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (TEMP_POPOUT_ACTION_LISTS.isEmpty()) {
+                        return;
+                    }
+
+                    // onDismiss -> closePopup -> undoPopout() must finish first.
+                    new android.os.Handler(android.os.Looper.getMainLooper())
+                            .post(ChromeInitHook::reconcileAfterPopupDismiss);
                 }
-                constructor.setAccessible(true);
-                XposedBridge.hookMethod(
-                    constructor,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                if (param.args == null || param.args.length != 9) {
-                                    return;
-                                }
-                                Object contents = param.args[4];
-                                if (contents == null
-                                        || UNPINNED_POPUP_CONTENTS.remove(contents) == null) {
-                                    return;
-                                }
-                                if (Boolean.TRUE.equals(param.args[8])) {
-                                    log("unpinned popup dismissal: inspecting with DevTools; "
-                                            + "preserving native touch behavior");
-                                    return;
-                                }
-
-                                Class<?> wrapperClass = XposedHelpers.findClassIfExists(
-                                        "org.chromium.ui.widget.AnchoredPopupWindow",
-                                        classLoader);
-                                if (wrapperClass == null) {
-                                    log("unpinned popup dismissal: AnchoredPopupWindow absent");
-                                    return;
-                                }
-
-                                Object anchored = null;
-                                for (Field field : popupClass.getDeclaredFields()) {
-                                    if (wrapperClass.isAssignableFrom(field.getType())) {
-                                        field.setAccessible(true);
-                                        anchored = field.get(param.thisObject);
-                                        break;
-                                    }
-                                }
-                                if (anchored == null) {
-                                    log("unpinned popup dismissal: anchored window not found");
-                                    return;
-                                }
-
-                                android.widget.PopupWindow popupWindow = null;
-                                for (Field field : wrapperClass.getDeclaredFields()) {
-                                    if (android.widget.PopupWindow.class
-                                            .isAssignableFrom(field.getType())) {
-                                        field.setAccessible(true);
-                                        Object value = field.get(anchored);
-                                        if (value instanceof android.widget.PopupWindow) {
-                                            popupWindow = (android.widget.PopupWindow) value;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (popupWindow == null) {
-                                    log("unpinned popup dismissal: underlying PopupWindow absent");
-                                    return;
-                                }
-
-                                // Configure before Chrome calls loadInitialPage().
-                                // Let Android's PopupDecorView handle outside-touch
-                                // dismissal and preserve the extension's inside taps.
-                                popupWindow.setTouchModal(true);
-                                popupWindow.setOutsideTouchable(true);
-                                log("unpinned popup dismissal: enabled outside-touch closing "
-                                        + "for " + param.args[3]);
-                            } catch (Throwable t) {
-                                log("unpinned popup dismissal hook failed: " + stackSummary(t));
-                            }
-                        }
-                    });
-                installed++;
-            }
-            log("installed unpinned extension popup outside-dismiss hook; "
-                    + "constructors=" + installed);
+            });
+            log("installed PopupWindow.dismiss temporary popout cleanup");
         } catch (Throwable t) {
-            log("could not hook unpinned popup constructors: " + stackSummary(t));
-        }
-    }
-
-    private static void installExtensionPopupDismissCleanup(ClassLoader classLoader) {
-        Class<?> popupClass = XposedHelpers.findClassIfExists(
-                "org.chromium.chrome.browser.toolbar.extensions.ExtensionActionPopup",
-                classLoader);
-        if (popupClass == null) {
-            log("ExtensionActionPopup not found; dismiss cleanup unavailable");
-            return;
-        }
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                    popupClass,
-                    "destroy",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                android.os.Handler handler =
-                                        new android.os.Handler(android.os.Looper.getMainLooper());
-                                handler.post(() -> reconcileAfterPopupDismiss());
-                            } catch (Throwable t) {
-                                log("popup dismiss cleanup scheduling failed: "
-                                        + stackSummary(t));
-                            }
-                        }
-                    });
-            log("installed ExtensionActionPopup.destroy dismiss cleanup");
-        } catch (Throwable t) {
-            log("could not hook ExtensionActionPopup.destroy: "
+            log("could not hook PopupWindow.dismiss for temporary popout: "
                     + stackSummary(t));
         }
     }
 
     private static void reconcileAfterPopupDismiss() {
+        if (TEMP_POPOUT_ACTION_LISTS.isEmpty()) {
+            return;
+        }
+
         try {
-            int count = 0;
+            int reconciled = 0;
+            int stillOpen = 0;
+
             synchronized (ACTIVE_EXTENSION_BRIDGES) {
                 for (Map.Entry<Activity, Object> entry
                         : ACTIVE_EXTENSION_BRIDGES.entrySet()) {
@@ -2998,17 +2882,44 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     }
 
                     try {
+                        Method hasActivePopup = bridge.getClass()
+                                .getDeclaredMethod("hasActivePopup");
+                        Method hasPoppedOutAction = bridge.getClass()
+                                .getDeclaredMethod("hasPoppedOutAction");
+                        hasActivePopup.setAccessible(true);
+                        hasPoppedOutAction.setAccessible(true);
+
+                        boolean popupActive =
+                                Boolean.TRUE.equals(hasActivePopup.invoke(bridge));
+                        boolean poppedOut =
+                                Boolean.TRUE.equals(hasPoppedOutAction.invoke(bridge));
+
+                        if (popupActive || poppedOut) {
+                            // This can also be a dismissal of the Extensions
+                            // list menu while an action popup is still opening.
+                            // Never remove its anchor prematurely.
+                            stillOpen++;
+                            continue;
+                        }
+
                         Method refresh = bridge.getClass()
                                 .getDeclaredMethod("onPinnedActionsChanged");
                         refresh.setAccessible(true);
                         refresh.invoke(bridge);
-                        count++;
+                        reconciled++;
                     } catch (Throwable t) {
                         log("popup dismiss reconcile failed: " + stackSummary(t));
                     }
                 }
             }
-            log("popup dismiss cleanup: reconciled " + count + " active bridge(s)");
+
+            if (reconciled > 0 && stillOpen == 0) {
+                TEMP_POPOUT_ACTION_LISTS.clear();
+                TEMP_POPOUT_BASE_ACTION_COUNTS.clear();
+                refreshBottomBarGeometry();
+                log("popup dismiss cleanup: temporary toolbar action removed; "
+                        + "reconciled=" + reconciled);
+            }
         } catch (Throwable t) {
             log("popup dismiss cleanup failed: " + stackSummary(t));
         }
@@ -3082,7 +2993,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             try {
                                 rememberExtensionBridge(param.thisObject);
                                 forcePendingExtensionActionLayout(
-                                        param.thisObject, actionId, param.args[1]);
+                                        param.thisObject, actionId);
                             } catch (Throwable t) {
                                 log("popup width bridge failed: " + stackSummary(t));
                             }
@@ -3098,8 +3009,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
     private static void forcePendingExtensionActionLayout(
             Object extensionsToolbarBridge,
-            String actionId,
-            Object popupContents) throws Throwable {
+            String actionId) throws Throwable {
         Object coordinator = null;
         Activity activity = null;
 
@@ -3190,9 +3100,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         }
 
         if (!actionAlreadyVisible) {
-            if (popupContents != null) {
-                UNPINNED_POPUP_CONTENTS.put(popupContents, Boolean.TRUE);
-            }
             int baseActionCount = 0;
             if (recyclerView instanceof ViewGroup) {
                 baseActionCount = ((ViewGroup) recyclerView).getChildCount();
@@ -3223,9 +3130,6 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             if (!actionAlreadyVisible) {
                 TEMP_POPOUT_ACTION_LISTS.remove(recyclerView);
                 TEMP_POPOUT_BASE_ACTION_COUNTS.remove(recyclerView);
-                if (popupContents != null) {
-                    UNPINNED_POPUP_CONTENTS.remove(popupContents);
-                }
             }
             log("popup bridge: reconcile trigger failed: " + stackSummary(t));
             return;
