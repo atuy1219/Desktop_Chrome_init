@@ -78,30 +78,41 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
-## Omnibox URL/keyboard diagnosis (unmerged PR, 0.4.17-diagnostics)
+## Omnibox focus-time URL recovery experiment (unmerged PR, 0.4.18)
 
-The installed Chrome 158.0.8127.22 has R8-obfuscated Omnibox classes. The
-previous diagnostic hook for `org.chromium.chrome.browser.omnibox.UrlBar`
-could not register (`ClassNotFoundException`), nor could the two old
-`OmniboxCapabilities` / `OmniboxFeatures` compatibility hooks.
+Device evidence from Chrome 158.0.8127.22: the URL editor contains ten
+characters on focus and is programmatically cleared to zero five
+milliseconds later. Chrome's `OmniboxCapabilities.hasDesktopExperience`
+and `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled` classes have
+different names in the installed R8-obfuscated APK; the previous hooks
+never installed. Upstream `FuseboxSessionState.activate()` initializes
+an empty text value for a phone that lacks desktop experience.
 
-The diagnostic now hooks Android framework `TextView.onFocusChanged()` and
-filters only the Chrome view whose stable resource ID is `R.id.url_bar`.
-This requires no release-Dex Omnibox class names. It records text lengths,
-focus transitions and IME visibility, never URLs, searches or typed contents.
-The diagnostic does not change Chrome's URL text or keyboard behavior.
+This experimental workaround uses only the Android framework
+`TextView.onFocusChanged()` and Chrome's stable `R.id.url_bar` resource:
+- Capture the displayed URL text at the moment focus starts, **without
+  logging the contents**.
+- Detect a nonempty-to-empty editor transition **within 160 ms** of focus.
+- Schedule at most one restoration after Chromium's normal model binding
+  is finished, only if the editor remains focused and unchanged.
+- Never restore a zero-length pre-focus URL, a truncated ellipsis string,
+  or text after the user has begun entering something else.
+- Keep the rest of Chrome's input handling and IME debounce unchanged.
 
-Reproduce on a normal HTTPS tab, then collect:
+Removed the older Omnibox-class-name hooks, which failed to install on
+the current Chrome build. This is an editor-state workaround, not yet a
+verified fix for Chromium's internal Fusebox session model or keyboard.
+
+Diagnostic command after navigating and tapping the URL bar:
 
 ```sh
-su -c 'logcat -d -v threadtime -b main | grep -E "DesktopChromeInit.*(URLBAR|Omnibox)" | tail -n 100'
+su -c 'logcat -d -v threadtime -b main | grep "DesktopChromeInit.*URLBAR" | tail -n 100'
 ```
 
-At startup expect `URLBAR framework focus hook installed`; on tapping
-the address bar expect `URLBAR focus-before` / `URLBAR focus-after-200ms`.
-If no `URLBAR` activity lines appear even after tapping, confirm that
-the Chrome URL field's resource ID is `url_bar` and that framework hooks
-are invoked via its superclass chain. Do not merge until device testing.
+Expected: `recovery armed`, `text length=X->0`,
+`recovery candidate`, `recovery applied` and then
+`recovery-after-200ms length=X`. Test typing, selecting, navigating,
+new tabs and the keyboard. Do **not merge before device confirmation**.
 
 ## Chrome 158 compatibility (0.4.12)
 
