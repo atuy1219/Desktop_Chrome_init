@@ -2859,8 +2859,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
         try {
-            XposedBridge.hookAllConstructors(
-                    popupClass,
+            int installed = 0;
+            for (java.lang.reflect.Constructor<?> constructor
+                    : popupClass.getDeclaredConstructors()) {
+                Class<?>[] parameters = constructor.getParameterTypes();
+                if (parameters.length != 9
+                        || parameters[0] != Activity.class
+                        || parameters[3] != String.class
+                        || parameters[8] != boolean.class) {
+                    continue;
+                }
+                constructor.setAccessible(true);
+                XposedBridge.hookMethod(
+                    constructor,
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
@@ -2929,7 +2940,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             }
                         }
                     });
-            log("installed unpinned extension popup outside-dismiss hook");
+                installed++;
+            }
+            log("installed unpinned extension popup outside-dismiss hook; "
+                    + "constructors=" + installed);
         } catch (Throwable t) {
             log("could not hook unpinned popup constructors: " + stackSummary(t));
         }
