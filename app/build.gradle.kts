@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.4.20-extensions-only"
+        versionCode = 40
+        versionName = "0.4.21-page-card-bar-align"
     }
 
     signingConfigs {
