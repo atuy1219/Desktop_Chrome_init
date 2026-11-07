@@ -3,117 +3,83 @@ package com.atuy.desktopchromeinit;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Rect;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.EditText;
 import android.widget.TextView;
-
-import java.util.Collections;
-import java.util.Map;
-import java.util.WeakHashMap;
 
 import com.atuy.desktopchromeinit.compat.XC_MethodHook;
 import com.atuy.desktopchromeinit.compat.XposedBridge;
 
 import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
- * Narrow Omnibox compatibility fixes for Chrome Desktop Android APKs
- * installed on phones that do not advertise android.hardware.type.pc.
+ * Chrome URL-bar compatibility on unsupported phone layouts.
  *
- * Do not spoof DeviceInfo.isDesktop() globally: doing so changes many
- * unrelated Chrome features and can trigger additional desktop-only paths.
+ * Chromium release APKs obfuscate the Omnibox implementation. Intercept
+ * Android's stable TextView focus callback and identify the URL field by
+ * Chrome's stable resource id, rather than depending on any internal
+ * Chromium Java class or method name.
+ *
+ * This is intentionally a conservative visual/editor-state workaround, not
+ * a replacement for Chromium's FuseboxSessionState implementation.
  */
 final class ChromeInputCompatibility {
     private static final String TAG = "DesktopChromeInit";
     private static final String TARGET = "com.android.chrome";
     private static final String PC_FEATURE = "android.hardware.type.pc";
-    private static volatile boolean desktopExperienceHooked;
-    private static volatile boolean keyboardDebounceHooked;
-    private static volatile boolean urlBarTraceHooked;
+
+    // Chromium 158 on phones may clear its own URL editor immediately after
+    // focus when the desktop initial-input retention branch is unavailable.
+    // Human-initiated text deletion and navigation must never be overridden.
+    private static final long RESTORE_WINDOW_MS = 160L;
+    private static volatile boolean urlBarHooked;
+
     private static final Map<TextView, Boolean> TRACKED_URL_BARS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<TextView, FocusSnapshot> FOCUS_SNAPSHOTS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private ChromeInputCompatibility() {}
 
-    static synchronized void install(ClassLoader loader) {
-        if (loader == null) return;
-        if (!desktopExperienceHooked) {
-            try {
-                Class<?> cls = Class.forName(
-                        "org.chromium.components.omnibox.OmniboxCapabilities",
-                        false, loader);
-                Method method = cls.getDeclaredMethod("hasDesktopExperience", Context.class);
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (param.args == null || param.args.length != 1
-                                || !(param.args[0] instanceof Context)) return;
-                        Context context = (Context) param.args[0];
-                        if (!shouldApplyFix(context)) return;
-                        // Retain the current URL when tapping the Omnibox. This
-                        // affects only Omnibox desktop-experience checks, not
-                        // Chrome's OS-wide DeviceInfo.isDesktop() result.
-                        param.setResult(true);
-                    }
-                });
-                desktopExperienceHooked = true;
-                log("Omnibox desktop-experience compatibility hook installed");
-            } catch (Throwable t) {
-                log("Omnibox desktop-experience hook unavailable: " + t);
-            }
-        }
+    private static final class FocusSnapshot {
+        final String originalText;
+        final long beganAt;
+        boolean scheduled;
+        boolean consumed;
 
-        if (!keyboardDebounceHooked) {
-            try {
-                Class<?> cls = Class.forName(
-                        "org.chromium.components.omnibox.OmniboxFeatures",
-                        false, loader);
-                Method method = cls.getDeclaredMethod("isDebounceKeyboardVisibilityEnabled");
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        Context context = ChromeInitHook.getCurrentChromeApplicationForInputFix();
-                        if (!shouldApplyFix(context)) return;
-                        // Use actual IME requests instead of relying on the
-                        // 150-ms SHOWN/HIDDEN state machine. In unsupported
-                        // desktop-on-phone setups that state can go stale when
-                        // the IME/window focus moves unexpectedly.
-                        param.setResult(false);
-                    }
-                });
-                keyboardDebounceHooked = true;
-                log("Omnibox IME debounce compatibility hook installed");
-            } catch (Throwable t) {
-                log("Omnibox IME debounce hook unavailable: " + t);
-            }
+        FocusSnapshot(String text) {
+            originalText = text;
+            beganAt = SystemClock.uptimeMillis();
         }
-
-        installUrlBarTrace(loader);
     }
 
-    /**
-     * Trace the Chrome URL editor without referring to its obfuscated class.
-     *
-     * Chrome 158 R8 renames org.chromium.chrome.browser.omnibox.UrlBar in the
-     * release DEX. Its superclass chain still invokes Android's TextView
-     * onFocusChanged(boolean, int, Rect), and the view retains R.id.url_bar.
-     * Filter at the stable resource ID before doing any work.
-     */
-    private static void installUrlBarTrace(ClassLoader loader) {
-        if (urlBarTraceHooked) return;
+    static synchronized void install(ClassLoader loader) {
+        if (loader == null || urlBarHooked) return;
         try {
-            Method method = TextView.class.getDeclaredMethod(
+            Method focus = TextView.class.getDeclaredMethod(
                     "onFocusChanged", boolean.class, int.class, Rect.class);
-            XposedBridge.hookMethod(method, new XC_MethodHook() {
+            XposedBridge.hookMethod(focus, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (!(param.thisObject instanceof TextView)) return;
                     TextView urlBar = (TextView) param.thisObject;
                     if (!isChromeUrlBar(urlBar)) return;
                     attachTextTrace(urlBar);
+
+                    if (param.args != null && param.args.length > 0
+                            && Boolean.TRUE.equals(param.args[0])) {
+                        captureFocusedUrl(urlBar);
+                    } else {
+                        FOCUS_SNAPSHOTS.remove(urlBar);
+                    }
                     logUrlBarState("focus-before", urlBar);
                 }
 
@@ -128,10 +94,39 @@ final class ChromeInputCompatibility {
                             () -> logUrlBarState("focus-after-200ms", urlBar), 200L);
                 }
             });
-            urlBarTraceHooked = true;
-            log("Omnibox URLBAR framework focus hook installed; filtered by R.id.url_bar");
+            urlBarHooked = true;
+            log("Omnibox URLBAR resource-scoped focus/recovery hook installed");
         } catch (Throwable t) {
-            log("Omnibox URLBAR framework focus hook unavailable: " + t);
+            log("Omnibox URLBAR resource-scoped focus hook unavailable: " + t);
+        }
+    }
+
+    private static void captureFocusedUrl(TextView view) {
+        try {
+            // Only on the unsupported-phone Desktop Chrome variant. Do not
+            // affect ordinary Chrome or a device with PC input capabilities.
+            if (!shouldApplyFix(view.getContext())) {
+                FOCUS_SNAPSHOTS.remove(view);
+                return;
+            }
+            CharSequence current = view.getText();
+            if (current == null || current.length() == 0) {
+                FOCUS_SNAPSHOTS.remove(view);
+                return;
+            }
+            String text = current.toString();
+            // An ellipsized or otherwise truncated display string must not
+            // be written back as a navigable URL.
+            if (text.indexOf('\u2026') >= 0) {
+                FOCUS_SNAPSHOTS.remove(view);
+                log("URLBAR recovery skipped: ellipsized display text");
+                return;
+            }
+            FOCUS_SNAPSHOTS.put(view, new FocusSnapshot(text));
+            log("URLBAR recovery armed length=" + text.length());
+        } catch (Throwable t) {
+            FOCUS_SNAPSHOTS.remove(view);
+            log("URLBAR recovery capture failed: " + t.getClass().getSimpleName());
         }
     }
 
@@ -171,8 +166,55 @@ final class ChromeInputCompatibility {
                 log("URLBAR text length=" + previousLength + "->" + currentLength
                         + " focused=" + view.hasFocus()
                         + " shown=" + view.isShown());
+
+                if (previousLength <= 0 || currentLength != 0 || !view.hasFocus()) {
+                    return;
+                }
+
+                FocusSnapshot snapshot = FOCUS_SNAPSHOTS.get(view);
+                if (snapshot == null || snapshot.scheduled || snapshot.consumed
+                        || SystemClock.uptimeMillis() - snapshot.beganAt > RESTORE_WINDOW_MS) {
+                    return;
+                }
+
+                // Defer until Chromium's UrlBarViewBinder finishes updating
+                // its model and releases ignoreTextChangesForAutocomplete.
+                snapshot.scheduled = true;
+                log("URLBAR recovery candidate: immediate focus-time clear");
+                view.post(() -> restoreIfStillValid(view, snapshot));
             }
         });
+    }
+
+    private static void restoreIfStillValid(TextView view, FocusSnapshot snapshot) {
+        if (FOCUS_SNAPSHOTS.get(view) != snapshot) return;
+        snapshot.consumed = true;
+        try {
+            long elapsed = SystemClock.uptimeMillis() - snapshot.beganAt;
+            if (elapsed > RESTORE_WINDOW_MS
+                    || !view.isAttachedToWindow()
+                    || !view.hasFocus()
+                    || !view.hasWindowFocus()
+                    || view.getText() == null
+                    || view.getText().length() != 0) {
+                log("URLBAR recovery skipped: stale, detached, or user text changed");
+                return;
+            }
+
+            // This is a best-effort experiment. Setting the editor text
+            // normally notifies Chromium's text listeners and lets its
+            // AutocompleteInput update. Do not mutate the private model.
+            view.setText(snapshot.originalText);
+            if (view instanceof EditText) {
+                ((EditText) view).selectAll();
+            }
+            log("URLBAR recovery applied length=" + snapshot.originalText.length());
+            view.postDelayed(() -> logUrlBarState("recovery-after-200ms", view), 200L);
+        } catch (Throwable t) {
+            log("URLBAR recovery failed: " + t.getClass().getSimpleName());
+        } finally {
+            FOCUS_SNAPSHOTS.remove(view);
+        }
     }
 
     private static void logUrlBarState(String event, TextView view) {
@@ -197,8 +239,8 @@ final class ChromeInputCompatibility {
         try {
             PackageManager pm = context.getPackageManager();
             if (pm.hasSystemFeature(PC_FEATURE)) return false;
-            // Only act on the Desktop Chrome variant containing the Extensions
-            // app menu entry. Avoid modifying ordinary mobile Chrome.
+            // Only Desktop Chrome with an Extensions menu resource. Resource
+            // names survive R8 renaming of Java implementation classes.
             return context.getResources().getIdentifier(
                     "extensions_menu_menu_id", "id", TARGET) != 0;
         } catch (Throwable t) {
