@@ -75,3 +75,7 @@ readable**; it is not silently labeled DIRECT.
 
 The probe is a separate APK and separate module ID. It can be removed without
 altering Desktop Chrome Init, user data, Chrome settings, or extensions.
+
+## v1.0.2 results
+
+If the phone lacks the PC hardware feature, the Chromium 158 Desktop device check can still be true if Chrome explicitly receives the force-desktop command-line switch. The module prints conditional interpretations, not a verified method return value. Check chrome://version for the active command line. The first snapshot logs reflection error types to explain missing Chromium class and method symbols.
