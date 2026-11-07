@@ -16,11 +16,16 @@ import android.util.Log;
  */
 final class ChromeNativeProbe {
     private static final String TAG = "ChromeNativeOmnibox";
+    private static final String BRIDGE_TAG = "DesktopChromeInit";
+    private static final String VERSION = "0.4.27";
+    private static int explicitLoads;
     private static boolean loaded;
     private static int loadAttempts;
     private static boolean snapshotsScheduled;
 
     static synchronized void start(String phase) {
+        Log.e(BRIDGE_TAG, "NATIVE_PROBE " + VERSION + " entered phase=" + phase
+                + " loaded=" + loaded + " attempts=" + loadAttempts);
         if (!loaded) {
             loadAttempts++;
             Log.i(TAG, "Java bootstrap phase=" + phase
@@ -30,9 +35,13 @@ final class ChromeNativeProbe {
             try {
                 System.loadLibrary("chrome_omnibox_probe");
                 loaded = true;
+                Log.e(BRIDGE_TAG, "NATIVE_PROBE System.loadLibrary OK phase=" + phase);
                 Log.i(TAG, "Java System.loadLibrary SUCCESS phase=" + phase
                         + " (native_init callback status checked separately)");
             } catch (Throwable failure) {
+                Log.e(BRIDGE_TAG, "NATIVE_PROBE System.loadLibrary FAILED phase="
+                        + phase + " type=" + failure.getClass().getSimpleName()
+                        + " message=" + failure.getMessage());
                 Log.e(TAG, "Java System.loadLibrary FAILED phase=" + phase
                         + " exception=" + failure.getClass().getName()
                         + ": " + failure.getMessage(), failure);
@@ -49,9 +58,14 @@ final class ChromeNativeProbe {
 
     private static void snapshot(String phase, int index) {
         try {
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE JNI snapshot BEGIN phase=" + phase);
             Log.i(TAG, "Java ELF snapshot requested phase=" + phase);
             nativeSnapshot(index);
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE JNI snapshot OK phase=" + phase);
         } catch (Throwable failure) {
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE JNI snapshot FAILED phase=" + phase
+                    + " type=" + failure.getClass().getSimpleName()
+                    + " message=" + failure.getMessage());
             Log.e(TAG, "Java ELF snapshot FAILED phase=" + phase
                     + " exception=" + failure.getClass().getName()
                     + ": " + failure.getMessage(), failure);
