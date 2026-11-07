@@ -34,20 +34,30 @@ Verified structurally against:
 
 Chrome 155/156 and later are intended to work without new mappings as long as Chromium keeps the same underlying Extensions/Toolbar architecture. A semantic Chromium refactor can still require a module change; no implementation can guarantee compatibility with arbitrary future code changes.
 
-## Unpinned popup dismissal (0.4.14)
+## Temporary toolbar action cleanup (0.4.15)
 
-The unpinned popup's temporary anchor can now be created by the
-`triggerPopup` bridge. On some phone window managers, however, its
-`AnchoredPopupWindow` does not dismiss on taps outside the extension popup.
-For **temporarily popped-out actions only**, the module configures Android's
-underlying `PopupWindow` as touch-modal and outside-touchable before loading
-the extension's popup contents. Pinned popups and DevTools inspect mode are
-left untouched. The temporary-action contents object matches the corresponding
-popup constructor, so only the intended popup is modified.
+On Chrome 158, unpinned extensions can now open using the temporary action
+anchor introduced in v0.4.13. Their popup already closes normally, but the
+temporary icon may remain in the phone Bottom Bar after popup dismissal.
 
-Look for `unpinned popup dismissal: enabled outside-touch closing` in logcat
-to confirm the new hook applied. This is a targeted workaround for
-outside-tap dismissal; runtime verification on ColorOS is still required.
+The v0.4.14 outside-touch workaround targeted the wrong symptom and has been
+reverted. Instead, the module now observes `PopupWindow.dismiss()` in Chrome
+and, after Chromium's own `closePopup() -> undoPopout()` callbacks finish,
+checks `ExtensionsToolbarBridge.hasActivePopup()` and
+`hasPoppedOutAction()`. When both are false, it notifies the existing
+action-list observer and refreshes the phone Bottom Bar layout. Pinned
+actions are untouched. An unrelated popup dismissal cannot prematurely
+remove a still-active temporary action.
+
+Diagnostics (after restarting Chrome and reproducing the issue):
+
+```sh
+su -c 'logcat -d -v threadtime -b main | grep -E "DesktopChromeInit.*(PopupWindow.dismiss|popup dismiss cleanup|popup bridge)" | tail -n 100'
+```
+
+Expected: `installed PopupWindow.dismiss temporary popout cleanup` at
+startup and `popup dismiss cleanup: temporary toolbar action removed`
+when closing the temporary extension popup. Device verification is required.
 
 ## Unpinned Extensions popup fix (0.4.13)
 
