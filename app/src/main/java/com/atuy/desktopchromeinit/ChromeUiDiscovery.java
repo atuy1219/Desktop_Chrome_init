@@ -24,6 +24,10 @@ final class ChromeUiDiscovery {
     private static final String TAG = "DesktopChromeInit";
     private static final String PREF = "desktopchromeinit_ui_discovery";
     private static final String KEY_VERSION = "chromeVersionCode";
+    private static final String KEY_SCHEMA = "uiDiscoverySchema";
+    // Increment when the module changes discovery logic. Re-scan on the
+    // next Chrome start even if the official Chrome version stays the same.
+    private static final int DISCOVERY_SCHEMA = 1;
     private static final String KEY_FAV_CLASS = "faviconClass";
     private static final String KEY_FAV_METHOD = "faviconMethod";
 
@@ -72,7 +76,8 @@ final class ChromeUiDiscovery {
             return;
         }
 
-        if (prefs.getLong(KEY_VERSION, -1) == version) {
+        if (prefs.getLong(KEY_VERSION, -1) == version
+                && prefs.getInt(KEY_SCHEMA, -1) == DISCOVERY_SCHEMA) {
             faviconClass = prefs.getString(KEY_FAV_CLASS, null);
             faviconMethod = prefs.getString(KEY_FAV_METHOD, null);
             Log.i(TAG, "UI discovery: cached Chrome version=" + version
@@ -97,6 +102,7 @@ final class ChromeUiDiscovery {
 
             // Save descriptors ONLY; no browsing data is stored in module prefs.
             prefs.edit().putLong(KEY_VERSION, version)
+                    .putInt(KEY_SCHEMA, DISCOVERY_SCHEMA)
                     .putString(KEY_FAV_CLASS, favicon == null ? null : favicon[0])
                     .putString(KEY_FAV_METHOD, favicon == null ? null : favicon[1])
                     .apply();
