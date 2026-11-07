@@ -78,29 +78,30 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
-## Omnibox URL/keyboard diagnosis (unmerged PR, 0.4.16-diagnostics)
+## Omnibox URL/keyboard diagnosis (unmerged PR, 0.4.17-diagnostics)
 
-The existing Chrome 158 `hasDesktopExperience(Context)` override does not
-directly preserve the URL; it changes Omnibox feature selection. The existing
-keyboard-debounce override may interact with Chromium's accessibility
-focus workaround and is not proof that IME behavior is repaired.
+The installed Chrome 158.0.8127.22 has R8-obfuscated Omnibox classes. The
+previous diagnostic hook for `org.chromium.chrome.browser.omnibox.UrlBar`
+could not register (`ClassNotFoundException`), nor could the two old
+`OmniboxCapabilities` / `OmniboxFeatures` compatibility hooks.
 
-A read-only diagnostic hook on `UrlBar.onFocusChanged()` records only text
-length, focus, window-focus, visibility, and IME visibility. A TextWatcher
-logs length transitions to distinguish an empty editor model from an empty
-view after focusing. **No URL, query, or typed text is collected**.
+The diagnostic now hooks Android framework `TextView.onFocusChanged()` and
+filters only the Chrome view whose stable resource ID is `R.id.url_bar`.
+This requires no release-Dex Omnibox class names. It records text lengths,
+focus transitions and IME visibility, never URLs, searches or typed contents.
+The diagnostic does not change Chrome's URL text or keyboard behavior.
 
-To reproduce, capture logcat before tapping the address bar:
+Reproduce on a normal HTTPS tab, then collect:
 
 ```sh
-su -c 'logcat -c'
-su -c 'logcat -v threadtime -b main -s DesktopChromeInit:V' > chrome_omnibox_trace.log
+su -c 'logcat -d -v threadtime -b main | grep -E "DesktopChromeInit.*(URLBAR|Omnibox)" | tail -n 100'
 ```
 
-Navigate to a normal HTTPS page, focus the URL bar once, then terminate
-the logcat command. Examine `URLBAR focus-before`, `URLBAR text length`,
-and `URLBAR focus-after-200ms`. This PR is diagnostic only: no behavior
-change or claim of a working fix. Do not merge before testing.
+At startup expect `URLBAR framework focus hook installed`; on tapping
+the address bar expect `URLBAR focus-before` / `URLBAR focus-after-200ms`.
+If no `URLBAR` activity lines appear even after tapping, confirm that
+the Chrome URL field's resource ID is `url_bar` and that framework hooks
+are invoked via its superclass chain. Do not merge until device testing.
 
 ## Chrome 158 compatibility (0.4.12)
 
