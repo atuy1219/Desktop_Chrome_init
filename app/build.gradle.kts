@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 42
-        versionName = "0.4.23-native-card-actions"
+        versionCode = 43
+        versionName = "0.4.24-native-favicon-clipboard"
     }
 
     signingConfigs {
