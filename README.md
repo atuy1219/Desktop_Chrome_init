@@ -78,6 +78,64 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## v0.4.25: Chrome ARM64 native Omnibox investigation (DIAGNOSTIC ONLY)
+
+Target: official Chrome Desktop Android 158.0.8127.22, preserving Google
+signature, account sync and Chrome extensions.
+
+Chromium `components/omnibox/browser/zero_suggest_verbatim_match_provider.cc`
+contains a `constexpr` build-flag check that suppresses normal web page
+zero-prefix verbatim suggestions under `IS_DESKTOP_ANDROID`. This value
+may be constant-folded and its helper inlined, so a Java override and
+a naive `dlsym("is_desktop_android")` cannot restore the provider.
+
+Added an actual native LSPosed library registration:
+
+- `app/src/main/resources/META-INF/xposed/native_init.list`
+- `app/src/main/cpp/native_omnibox_probe.c` (NDK arm64-v8a)
+- `app/src/main/cpp/CMakeLists.txt`
+- `tools/inspect_chrome_native.py` (offline APK ELF inspector)
+
+During `dlopen` callbacks, this module *only reads* Chromium's mapped ELF
+Build ID and mapping address, checks whether its C++
+`ZeroSuggestVerbatimMatchProvider::Start` is exported, and reports whether
+the framework provided its native hook API. Source-verified mangled symbol:
+
+    _ZN32ZeroSuggestVerbatimMatchProvider5StartERK17AutocompleteInputb
+
+**It does not install a hook or patch executable code yet.** A release
+`libmonochrome.so` is often stripped; if `Start` is absent, a safe
+version-specific ARM64 instruction signature and exact build-ID validation
+must be established before installing an inline hook or interceptor.
+Random symbol/offset guesses are explicitly prohibited.
+
+### Native diagnostics
+
+Enable the module for Chrome, force-stop and relaunch Chrome. Collect:
+
+    su -c 'logcat -d -v threadtime -b main' | grep -E 'ChromeNativeOmnibox|Current-page card:'
+
+Expected on native callback registration:
+
+    ChromeNativeOmnibox: LSPosed native_init initialized ... mode=DIAGNOSTIC_ONLY
+
+Then a mapped Chromium ELF report (including build ID), if the Vector
+implementation provides the native load callbacks for the Chrome library.
+No native-hook success is claimed merely because the .so builds. If these
+lines are absent, the native entry/load lifecycle needs to be debugged.
+
+Offline APK inventory, without modifying originals:
+
+    python tools/inspect_chrome_native.py base.apk split_chrome.apk split_config.ja.apk split_dev_ui.apk split_on_demand.apk
+
+It lists native ELF filenames, SHA-256, build IDs, ABI and relevant
+exported symbols. Installing a native extension does not change the Google
+Chrome APK signature or account sync.
+
+Keep PR #21 unmerged until native target identification, a fingerprinted
+test hook, and real-device acceptance (current-page candidate produced
+by Chrome's native Autocomplete list, normal typing, IME and extensions).
+
 ## v0.4.24: native favicon, card spacing and clipboard URL (TEST ONLY)
 
 Most-visited website tiles are deferred at the user's request.
