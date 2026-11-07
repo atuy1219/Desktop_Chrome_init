@@ -102,7 +102,7 @@ final class CurrentPageCardFix {
                     if ((Boolean) param.args[0]) {
                         onFocus(view);
                     } else {
-                        CardSession session = SESSIONS.get(view);
+                        CardSession session = SESSIONS.remove(view);
                         if (session != null) removeCard(session);
                     }
                 }
