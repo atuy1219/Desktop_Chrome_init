@@ -34,6 +34,48 @@ Verified structurally against:
 
 Chrome 155/156 and later are intended to work without new mappings as long as Chromium keeps the same underlying Extensions/Toolbar architecture. A semantic Chromium refactor can still require a module change; no implementation can guarantee compatibility with arbitrary future code changes.
 
+## Chrome 158 compatibility (0.4.12)
+
+Chromium 158 still dispatches the Extensions app-menu action through
+`ToolbarManager.getExtensionsToolbarCoordinator().showExtensionsMenu()`.
+This module now also recognizes the getter call in the menu handler's DEX
+bytecode (not only a direct coordinator field read), and treats the new
+second Runnable captured by the Extensions supplier as an Omnibox focus
+callback rather than incorrectly reusing the coordinator destruction callback.
+
+**Status:** This adjustment is based on upstream Chromium 158 source. The
+Chrome 158 release DEX has **not yet been verified on a device**; a successful
+APK build alone does not prove the Extensions popup is working.
+
+On unsupported phone devices that install the Desktop Android Chrome APK, the
+module additionally attempts two isolated Omnibox hooks:
+
+- `OmniboxCapabilities.hasDesktopExperience(Context)`: retain the current URL
+  when the address bar gains focus, without spoofing `DeviceInfo.isDesktop()`
+  for the entire Chrome process.
+- `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled()`: disable the
+  internal 150 ms IME visibility debounce and use immediate show/hide requests
+  instead. This is an experimental workaround for stale keyboard state; it
+  does not repair a system-level InputDispatcher or navigation-gesture failure.
+
+Both changes are applied only when the Chrome package has an Extensions menu
+resource and Android does not report `android.hardware.type.pc`. If R8 has
+renamed the relevant Java classes/methods in the installed Chrome APK, the
+hooks fail safely and log that they were not installed.
+
+### Diagnostics
+
+After reproducing a click that appears to do nothing:
+
+```sh
+su -c 'logcat -d -v threadtime | grep -Ei "DesktopChromeInit|InputMethodManager|ImeTracker|BackNavigation" | tail -n 200'
+```
+
+The key messages are `DEX symbols resolved`, `Extensions menu click`,
+`source-exact repair: Runnable captures` and `Extensions-menu NPE`. If
+the coordinator cannot be initialized, the module now reports the protected
+null-pointer failure with a toast instead of silently ignoring it.
+
 ## What is being fixed
 
 Desktop Chrome contains Extensions toolbar code intended for tablet/desktop toolbar layouts. On a phone layout, Chrome may skip creation of the Extensions coordinator or its synthetic factory may hard-cast the active toolbar to `ToolbarTablet`.
