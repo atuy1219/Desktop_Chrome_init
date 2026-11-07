@@ -1453,5 +1453,53 @@ final class ChromeDexResolver {
         }
     }
 
+    /**
+     * Locates Chromium TabFavicon's R8-obfuscated static bitmap accessor.
+     * The upstream class defines BOTH Bitmap(Tab) and Bitmap(Tab, boolean).
+     * Find an exact matching *pair* by DEX method signatures, not names;
+     * reject ambiguous pairs rather than invoking an unrelated function.
+     *
+     * Called on a worker only after the installed Chrome package version
+     * changes. Return [ownerClass, methodName, tabParameterDescriptor].
+     */
+    static String[] findFaviconAccessor(ApplicationInfo appInfo) throws IOException {
+        List<DexFile> dexes = loadApplicationDexFiles(appInfo);
+        ArrayList<String[]> matches = new ArrayList<>();
+        for (DexFile dex : dexes) {
+            for (ClassDef owner : dex.classes.values()) {
+                String noFallbackName = null;
+                String fallbackName = null;
+                String tabDescriptor = null;
+                for (MethodDef def : dex.getDefinedMethods(owner)) {
+                    if ((def.accessFlags & ACC_STATIC) == 0) continue;
+                    MethodId id = dex.methods[def.methodIndex];
+                    Proto proto = dex.protos[id.protoIndex];
+                    if (!"Landroid/graphics/Bitmap;".equals(proto.returnDescriptor)) {
+                        continue;
+                    }
+                    String[] ps = proto.parameterDescriptors;
+                    if (ps.length == 1 && ps[0].endsWith("/tab/Tab;")) {
+                        noFallbackName = id.name;
+                        tabDescriptor = ps[0];
+                    } else if (ps.length == 2 && ps[0].endsWith("/tab/Tab;")
+                            && BOOLEAN.equals(ps[1])) {
+                        fallbackName = id.name;
+                        tabDescriptor = ps[0];
+                    }
+                }
+                if (fallbackName != null && noFallbackName != null) {
+                    matches.add(new String[] {
+                            descriptorToClassName(owner.descriptor),
+                            fallbackName, tabDescriptor
+                    });
+                }
+            }
+        }
+        if (matches.size() != 1) {
+            throw new IOException("TabFavicon DEX candidate count=" + matches.size());
+        }
+        return matches.get(0);
+    }
+
     private ChromeDexResolver() {}
 }
