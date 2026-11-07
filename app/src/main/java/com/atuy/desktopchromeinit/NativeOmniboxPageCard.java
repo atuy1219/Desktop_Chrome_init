@@ -399,7 +399,10 @@ final class NativeOmniboxPageCard {
             // Add Android ImageViews with *Chrome's own* action ViewGroup
             // layout params, rather than falling back to an unrelated
             // 2-row custom card.
-            if (!appendNativeLayoutActionButtons(card, activity)) return false;
+            if (!appendNativeLayoutActionButtons(card, activity)) {
+                discardPartialActionChildren(card, initial);
+                return false;
+            }
             info("R8 removed native action builder; using native action layout");
         }
 
@@ -408,7 +411,10 @@ final class NativeOmniboxPageCard {
             View child = card.getChildAt(i);
             if (child instanceof ImageView) actions.add((ImageView) child);
         }
-        if (actions.size() != 3) return false;
+        if (actions.size() != 3) {
+            discardPartialActionChildren(card, initial);
+            return false;
+        }
 
         // Chrome's native BaseSuggestionView creates these three
         // ActionButtonView instances with the right hit area, focus,
@@ -462,6 +468,13 @@ final class NativeOmniboxPageCard {
             action.setOnClickListener(v -> callback.run());
         }
         return true;
+    }
+
+    private static void discardPartialActionChildren(
+            ViewGroup card, int originalChildCount) {
+        while (card.getChildCount() > originalChildCount) {
+            card.removeViewAt(card.getChildCount() - 1);
+        }
     }
 
     private static boolean appendNativeLayoutActionButtons(
