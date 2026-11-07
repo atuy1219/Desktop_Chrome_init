@@ -80,6 +80,7 @@ final class CurrentPageCardFix {
         ViewGroup card;
         int baselineTopPadding;
         int cardHeight;
+        int reservedHeight;
         android.view.ViewTreeObserver.OnPreDrawListener layoutObserver;
 
         CardSession(TextView urlBar, String displayBeforeFocus) {
@@ -212,8 +213,33 @@ final class CurrentPageCardFix {
                 Log.i(TAG, "Current-page card: native row unavailable; "
                         + "styled fallback based on Chrome's own suggestion row");
             }
+            // An actual Chromium clipboard suggestion is already handled by
+            // the normal RecyclerView. Only supply a native-view fallback when
+            // a recent URL is missing and this is a verified regular tab.
+            ViewGroup clipboardCard = NativeClipboardSuggestion.maybeBuild(
+                    activity, (ViewGroup) dropdown, session.urlBar,
+                    page.offTheRecord);
+            if (clipboardCard != null) {
+                LinearLayout cardGroup = new LinearLayout(activity);
+                cardGroup.setOrientation(LinearLayout.VERTICAL);
+                cardGroup.setClipChildren(false);
+                cardGroup.addView(session.card, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams clipboardParams =
+                        new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT);
+                clipboardParams.topMargin = dp(activity, 12);
+                cardGroup.addView(clipboardCard, clipboardParams);
+                session.card = cardGroup;
+            }
+            final int sideSpacing = NativeOmniboxPageCard.dimension(
+                    activity, "omnibox_suggestion_side_spacing_smallest", 8);
+            final int nativeRowWidth = Math.max(
+                    dp(activity, 140), dropdown.getWidth() - 2 * sideSpacing);
             session.card.measure(
-                    View.MeasureSpec.makeMeasureSpec(dropdown.getWidth(),
+                    View.MeasureSpec.makeMeasureSpec(nativeRowWidth,
                             View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             session.cardHeight = session.card.getMeasuredHeight();
@@ -221,13 +247,17 @@ final class CurrentPageCardFix {
                 session.card = null;
                 return;
             }
+            final int afterCardSpacing = dp(activity, 12);
+            session.reservedHeight = session.cardHeight + afterCardSpacing;
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, session.cardHeight, Gravity.TOP);
+                    nativeRowWidth, session.cardHeight, Gravity.TOP | Gravity.START);
+            lp.leftMargin = sideSpacing;
+            lp.rightMargin = sideSpacing;
             lp.topMargin = dropdown.getTop() + session.baselineTopPadding;
             session.suggestionContainer.addView(session.card, lp);
             dropdown.setPaddingRelative(
                     dropdown.getPaddingStart(),
-                    session.baselineTopPadding + session.cardHeight,
+                    session.baselineTopPadding + session.reservedHeight,
                     dropdown.getPaddingEnd(), dropdown.getPaddingBottom());
             session.card.setElevation(dp(activity, 1));
             session.card.bringToFront();
@@ -241,13 +271,13 @@ final class CurrentPageCardFix {
                 if (session.card == null || session.dropdown == null
                         || !session.urlBar.hasFocus()) return true;
                 int actualPadding = session.dropdown.getPaddingTop();
-                int expectedPadding = session.baselineTopPadding + session.cardHeight;
+                int expectedPadding = session.baselineTopPadding + session.reservedHeight;
                 if (actualPadding != expectedPadding
-                        && actualPadding < session.cardHeight) {
+                        && actualPadding < session.reservedHeight) {
                     session.baselineTopPadding = actualPadding;
                     session.dropdown.setPaddingRelative(
                             session.dropdown.getPaddingStart(),
-                            actualPadding + session.cardHeight,
+                            actualPadding + session.reservedHeight,
                             session.dropdown.getPaddingEnd(),
                             session.dropdown.getPaddingBottom());
                 }
@@ -595,7 +625,7 @@ final class CurrentPageCardFix {
             session.layoutObserver = null;
             if (session.dropdown != null && session.card != null) {
                 ViewGroup list = session.dropdown;
-                int expected = session.baselineTopPadding + session.cardHeight;
+                int expected = session.baselineTopPadding + session.reservedHeight;
                 if (list.getPaddingTop() == expected) {
                     list.setPaddingRelative(list.getPaddingStart(),
                             session.baselineTopPadding,
@@ -612,6 +642,7 @@ final class CurrentPageCardFix {
         session.dropdown = null;
         session.suggestionContainer = null;
         session.cardHeight = 0;
+        session.reservedHeight = 0;
     }
 
     private static int themeColor(Context context, int attribute, int fallback) {
