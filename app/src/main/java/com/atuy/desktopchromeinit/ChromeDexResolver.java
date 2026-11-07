@@ -1465,6 +1465,7 @@ final class ChromeDexResolver {
     static String[] findFaviconAccessor(ApplicationInfo appInfo) throws IOException {
         List<DexFile> dexes = loadApplicationDexFiles(appInfo);
         ArrayList<String[]> matches = new ArrayList<>();
+        ArrayList<String[]> singleMethods = new ArrayList<>();
         for (DexFile dex : dexes) {
             for (ClassDef owner : dex.classes.values()) {
                 String noFallbackName = null;
@@ -1493,12 +1494,22 @@ final class ChromeDexResolver {
                             fallbackName, tabDescriptor
                     });
                 }
+                if (fallbackName != null) {
+                    singleMethods.add(new String[] {
+                            descriptorToClassName(owner.descriptor),
+                            fallbackName, tabDescriptor
+                    });
+                }
             }
         }
-        if (matches.size() != 1) {
-            throw new IOException("TabFavicon DEX candidate count=" + matches.size());
+        if (matches.size() == 1) return matches.get(0);
+        // The no-fallback overload may have been removed by R8. Permit a
+        // unique signature-only fallback; refuse a tie.
+        if (matches.isEmpty() && singleMethods.size() == 1) {
+            return singleMethods.get(0);
         }
-        return matches.get(0);
+        throw new IOException("TabFavicon DEX pairCandidates=" + matches.size()
+                + " fallbackCandidates=" + singleMethods.size());
     }
 
     private ChromeDexResolver() {}
