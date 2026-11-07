@@ -692,6 +692,12 @@ final class ChromeDexResolver {
             throw new IOException("ChromeTabbedActivity class not found");
         }
 
+        // Newer Chromium invokes ToolbarManager.getExtensionsToolbarCoordinator()
+        // rather than accessing the field directly. Resolve that getter from its
+        // return type and backing-field access, not its R8-obfuscated name.
+        MethodId coordinatorGetter = findCoordinatorGetter(
+                dexFiles, toolbarManagerDescriptor, coordinatorField);
+
         MenuCandidate best = null;
         MenuCandidate second = null;
         for (MethodDef def : activityDex.getDefinedMethods(activityClass)) {
@@ -717,6 +723,12 @@ final class ChromeDexResolver {
                             coordinatorField.typeDescriptor)) {
                 score += 80;
             }
+            if (def.codeOffset != 0 && coordinatorGetter != null
+                    && methodInvokesCoordinatorGetter(
+                            activityDex, def, toolbarManagerDescriptor,
+                            coordinatorGetter)) {
+                score += 120;
+            }
 
             MenuCandidate candidate = new MenuCandidate(
                     method.name, p[3], score);
@@ -737,6 +749,61 @@ final class ChromeDexResolver {
                     "Ambiguous ChromeTabbedActivity menu handlers");
         }
         return best;
+    }
+
+    /**
+     * Locate the zero-argument coordinator getter by its return descriptor
+     * and direct read of ToolbarManager's coordinator field. This survives R8
+     * renames, and avoids guessing which candidate handles app menu commands.
+     */
+    private static MethodId findCoordinatorGetter(
+            List<DexFile> dexFiles,
+            String managerDescriptor,
+            FieldId coordinatorField) {
+        for (DexFile dex : dexFiles) {
+            ClassDef managerClass = dex.classes.get(managerDescriptor);
+            if (managerClass == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(managerClass)) {
+                MethodId id = dex.methods[def.methodIndex];
+                Proto proto = dex.protos[id.protoIndex];
+                if (proto.parameterDescriptors.length != 0
+                        || !coordinatorField.typeDescriptor.equals(proto.returnDescriptor)
+                        || def.codeOffset == 0) {
+                    continue;
+                }
+                if (methodReferencesField(dex, def, managerDescriptor,
+                        coordinatorField.name, coordinatorField.typeDescriptor)) {
+                    return id;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** DEX invoke-kind opcodes use the next code unit as their method index. */
+    private static boolean methodInvokesCoordinatorGetter(
+            DexFile dex,
+            MethodDef def,
+            String ownerDescriptor,
+            MethodId getter) {
+        short[] insns = dex.readCodeUnits(def.codeOffset);
+        for (int i = 0; i + 1 < insns.length; i++) {
+            int opcode = insns[i] & 0xff;
+            if (!((opcode >= 0x6e && opcode <= 0x72)
+                    || (opcode >= 0x74 && opcode <= 0x78))) {
+                continue;
+            }
+            int methodIndex = insns[i + 1] & 0xffff;
+            if (methodIndex < 0 || methodIndex >= dex.methods.length) continue;
+            MethodId target = dex.methods[methodIndex];
+            Proto targetProto = dex.protos[target.protoIndex];
+            if (ownerDescriptor.equals(target.ownerDescriptor)
+                    && getter.name.equals(target.name)
+                    && targetProto.parameterDescriptors.length == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean methodReferencesField(
