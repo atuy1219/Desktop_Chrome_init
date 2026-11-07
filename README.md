@@ -168,6 +168,42 @@ Keep PR #21 unmerged until native target identification, a fingerprinted
 test hook, and real-device acceptance (current-page candidate produced
 by Chrome's native Autocomplete list, normal typing, IME and extensions).
 
+## Native diagnosis v0.4.27 (TEST ONLY)
+
+When `ChromeNativeOmnibox` has no output, first confirm the module's
+installed version and scope. This revision emits `NATIVE_PROBE` markers
+under the already verified `DesktopChromeInit` tag at three independent
+stages: `ModernEntry.onModuleLoaded`, `ChromeInitHook.handleLoadPackage`
+and `Application.attach`. Errors are caught so the ordinary Chrome hooks
+are not blocked by native loading failures.
+
+The previous `native_init.list` registration cannot be assumed to execute
+on Vector/libxposed. The module instead attempts explicit
+`System.loadLibrary("chrome_omnibox_probe")`. If the module ClassLoader
+does not expose the native-lib directory, the authenticated installed
+module's nativeLibraryDir and Android APK `!/lib/arm64-v8a/` path are
+tried after the Chrome Application Context exists. The module's own
+ClassLoader string provides a bounded fallback for finding its APK.
+Every attempt reports `NATIVE_PROBE` success/failure without exposing
+page content or private browser files.
+
+Reproduction after installing signed v0.4.27:
+
+```sh
+su -c 'dumpsys package com.atuy.desktopchromeinit | grep -E "versionCode=|versionName=" | head'
+su -c 'am force-stop com.android.chrome'
+su -c 'logcat -c'
+su -c 'monkey -p com.android.chrome 1' >/dev/null
+sleep 12
+su -c 'logcat -d -b main -b system -v threadtime | grep -Ei "NATIVE_PROBE|ChromeNativeOmnibox|DesktopChromeInit|VectorModuleManager|UnsatisfiedLinkError" | tail -n 180'
+```
+
+An empty `ChromeNativeOmnibox` filter alone is not sufficient evidence
+of native-init failure. Distinguish absent module invocation, failed
+native ELF resolution and absent JNI registration. No inline native
+hook or C++ code patch is installed in this diagnostic build.
+Keep PR #21 unmerged until the device test is reviewed.
+
 ## v0.4.24: native favicon, card spacing and clipboard URL (TEST ONLY)
 
 Most-visited website tiles are deferred at the user's request.
