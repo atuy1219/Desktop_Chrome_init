@@ -34,7 +34,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 public final class ProbeEntry extends XposedModule {
     private static final String TAG = "ChromeDesktopProbe";
     private static final String CHROME = "com.android.chrome";
-    private static final int MAX_REPORTS = 8;
+    private static final int MAX_REPORTS = 3;
 
     private volatile boolean isChromeProcess;
     private volatile Context chromeContext;
