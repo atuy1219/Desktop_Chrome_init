@@ -1,8 +1,16 @@
 package com.atuy.desktopchromeinit;
 
+import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+
+import java.io.File;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Explicit module-library bootstrap for native Chrome diagnostics.
@@ -54,6 +62,84 @@ final class ChromeNativeProbe {
         snapshot("initial", 0);
         main.postDelayed(() -> snapshot("after-3s", 1), 3000L);
         main.postDelayed(() -> snapshot("after-10s", 2), 10000L);
+    }
+
+    /**
+     * Fallback for Xposed runtimes whose module class loader has no native
+     * library search path. Android can load either an extracted module ELF
+     * or an uncompressed page-aligned ELF inside its installed APK.
+     *
+     * No Chrome APK is modified. No unknown filesystem paths are searched.
+     * The PackageManager lookup may be disallowed by package visibility;
+     * the module-classloader path gives an independent fallback.
+     */
+    static synchronized void startWithContext(Context chromeContext, String phase) {
+        start(phase);
+        if (loaded || chromeContext == null) return;
+
+        Set<String> candidates = new LinkedHashSet<>();
+        try {
+            ApplicationInfo info = chromeContext.getPackageManager()
+                    .getApplicationInfo("com.atuy.desktopchromeinit", 0);
+            if (info.nativeLibraryDir != null) {
+                File extracted = new File(info.nativeLibraryDir,
+                        "libchrome_omnibox_probe.so");
+                if (extracted.isFile()) candidates.add(extracted.getAbsolutePath());
+            }
+            addApkCandidate(candidates, info.sourceDir);
+            if (info.splitSourceDirs != null) {
+                for (String split : info.splitSourceDirs) {
+                    addApkCandidate(candidates, split);
+                }
+            }
+        } catch (Throwable failure) {
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE package lookup unavailable type="
+                    + failure.getClass().getSimpleName());
+        }
+
+        // The module's class loader itself may retain the actual APK location.
+        // This is bounded parsing of its printed source path, not scanning
+        // Chrome's private directories or arbitrary APK files.
+        try {
+            String desc = String.valueOf(ChromeNativeProbe.class.getClassLoader());
+            Matcher matcher = Pattern.compile("zip file \\"([^\\"]+\\.apk)\\"")
+                    .matcher(desc);
+            while (matcher.find()) {
+                String path = matcher.group(1);
+                if (path != null && path.contains("com.atuy.desktopchromeinit")) {
+                    addApkCandidate(candidates, path);
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        for (String candidate : candidates) {
+            explicitLoads++;
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE absolute load attempt="
+                    + explicitLoads + " phase=" + phase);
+            try {
+                System.load(candidate);
+                loaded = true;
+                Log.e(BRIDGE_TAG, "NATIVE_PROBE absolute load SUCCESS phase="
+                        + phase + " attempt=" + explicitLoads);
+                break;
+            } catch (Throwable failure) {
+                Log.e(BRIDGE_TAG, "NATIVE_PROBE absolute load FAILED phase="
+                        + phase + " attempt=" + explicitLoads + " type="
+                        + failure.getClass().getSimpleName() + " message="
+                        + failure.getMessage());
+            }
+        }
+        if (!loaded) {
+            Log.e(BRIDGE_TAG, "NATIVE_PROBE no load candidate succeeded"
+                    + " candidates=" + candidates.size());
+            return;
+        }
+        start("absolute-loaded:" + phase);
+    }
+
+    private static void addApkCandidate(Set<String> candidates, String path) {
+        if (path == null || !path.endsWith(".apk")) return;
+        candidates.add(path + "!/lib/arm64-v8a/libchrome_omnibox_probe.so");
     }
 
     private static void snapshot(String phase, int index) {
