@@ -78,6 +78,42 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
+## Chromium native current-page view reuse (v0.4.22 — TEST ONLY)
+
+The v0.4.21 custom overlay made text and controls too dark and had an
+unlike-Chrome second action row. Chromium 158 does **not** use a separate
+special layout for the mobile Edit URL card:
+`OmniboxViewHolderFactory` registers `EDIT_URL_SUGGESTION = 1` with
+`BaseSuggestionView(R.layout.omnibox_basic_suggestion)` and the standard
+`SuggestionViewViewBinder`; `EditUrlSuggestionProcessor` supplies page
+text, favicon, and the three action buttons.
+
+v0.4.22 first asks the *already running* OmniboxSuggestionsDropdown's own
+ViewHolder factory to construct its `EDIT_URL_SUGGESTION` view. This reuses
+Chrome's **actual** XML, typography, icon positions, hit areas, selection
+foreground and sizing code, without requiring the R8-obfuscated class names.
+The three native `ActionButtonView` instances receive the full verified
+Tab URL and Share/Copy/Edit click handlers.
+
+This does not reinstate the C++ `ZeroSuggestVerbatimMatchProvider` and
+does not call the native `EditUrlSuggestionProcessor.populateModel()`, since
+the Desktop Android build never sends it a valid suggestion. It is native
+*view* reuse with external data and actions, not a native autocomplete match.
+
+If the Chrome factory has been removed by R8 or cannot be found, v0.4.22
+falls back to v0.4.21's view but derives text colors and the selectable
+background from a real on-screen Omnibox suggestion to avoid illegible
+dark-on-dark text. The log distinguishes the two paths.
+
+**Validate in Chrome 158, night/light and incognito:** native-view log,
+first-row title/URL, action placement, Share/Copy/Edit, keyboard, scrolling,
+focusing/unfocusing, and zero-prefix suggestions. No merge before testing.
+
+Source:
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/OmniboxViewHolderFactory.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/base/BaseSuggestionView.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/base/SuggestionLayout.java
+
 ## Native-like current-page suggestion and measured Bottom Bar (0.4.21, TEST ONLY)
 
 Chromium 158 Desktop Android builds suppress the ordinary active-page URL
