@@ -78,6 +78,7 @@ final class CurrentPageCardFix {
         LinearLayout card;
         int baselineTopPadding;
         int cardHeight;
+        android.view.ViewTreeObserver.OnPreDrawListener layoutObserver;
 
         CardSession(TextView urlBar, String displayBeforeFocus) {
             this.urlBar = urlBar;
@@ -214,6 +215,41 @@ final class CurrentPageCardFix {
                     dropdown.getPaddingEnd(), dropdown.getPaddingBottom());
             session.card.setElevation(dp(activity, 1));
             session.card.bringToFront();
+
+            // Chrome can update OmniboxAlignment.paddingTop after the first
+            // suggestion list has been shown (IME and bottom/top toolbar
+            // transitions). Reapply the row inset when Chromium replaces
+            // RecyclerView's padding, and follow its measured dropdown top.
+            // No native suggestion adapter or scroll position is modified.
+            session.layoutObserver = () -> {
+                if (session.card == null || session.dropdown == null
+                        || !session.urlBar.hasFocus()) return true;
+                int actualPadding = session.dropdown.getPaddingTop();
+                int expectedPadding = session.baselineTopPadding + session.cardHeight;
+                if (actualPadding != expectedPadding
+                        && actualPadding < session.cardHeight) {
+                    session.baselineTopPadding = actualPadding;
+                    session.dropdown.setPaddingRelative(
+                            session.dropdown.getPaddingStart(),
+                            actualPadding + session.cardHeight,
+                            session.dropdown.getPaddingEnd(),
+                            session.dropdown.getPaddingBottom());
+                }
+                ViewGroup.LayoutParams base = session.card.getLayoutParams();
+                if (base instanceof FrameLayout.LayoutParams) {
+                    FrameLayout.LayoutParams layout =
+                            (FrameLayout.LayoutParams) base;
+                    int wantedTop = session.dropdown.getTop()
+                            + session.baselineTopPadding;
+                    if (layout.topMargin != wantedTop) {
+                        layout.topMargin = wantedTop;
+                        session.card.setLayoutParams(layout);
+                    }
+                }
+                return true;
+            };
+            session.dropdown.getViewTreeObserver()
+                    .addOnPreDrawListener(session.layoutObserver);
             session.suggestionContainer.requestLayout();
             Log.i(TAG, "Current-page card: shown, heightPx=" + session.cardHeight
                     + " (URL from active Chrome tab)");
@@ -517,6 +553,12 @@ final class CurrentPageCardFix {
 
     private static void removeCard(CardSession session) {
         try {
+            if (session.dropdown != null && session.layoutObserver != null
+                    && session.dropdown.getViewTreeObserver().isAlive()) {
+                session.dropdown.getViewTreeObserver()
+                        .removeOnPreDrawListener(session.layoutObserver);
+            }
+            session.layoutObserver = null;
             if (session.dropdown != null && session.card != null) {
                 ViewGroup list = session.dropdown;
                 int expected = session.baselineTopPadding + session.cardHeight;
