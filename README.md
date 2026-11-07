@@ -78,41 +78,39 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
-## Omnibox focus-time URL recovery experiment (unmerged PR, 0.4.18)
+## Native Android current-page suggestion (unmerged test, 0.4.19)
 
-Device evidence from Chrome 158.0.8127.22: the URL editor contains ten
-characters on focus and is programmatically cleared to zero five
-milliseconds later. Chrome's `OmniboxCapabilities.hasDesktopExperience`
-and `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled` classes have
-different names in the installed R8-obfuscated APK; the previous hooks
-never installed. Upstream `FuseboxSessionState.activate()` initializes
-an empty text value for a phone that lacks desktop experience.
+Chrome 158 already ships the built-in `EditUrlSuggestionProcessor`, which
+renders the current page's title, URL, favicon, and Share/Copy/Edit actions as
+the first suggestion when the user focuses an empty Omnibox on a website.
 
-This experimental workaround uses only the Android framework
-`TextView.onFocusChanged()` and Chrome's stable `R.id.url_bar` resource:
-- Capture the displayed URL text at the moment focus starts, **without
-  logging the contents**.
-- Detect a nonempty-to-empty editor transition **within 160 ms** of focus.
-- Schedule at most one restoration after Chromium's normal model binding
-  is finished, only if the editor remains focused and unchanged.
-- Never restore a zero-length pre-focus URL, a truncated ellipsis string,
-  or text after the user has begun entering something else.
-- Keep the rest of Chrome's input handling and IME debounce unchanged.
+That processor deliberately rejects desktop-experience contexts:
+`if (OmniboxCapabilities.hasDesktopExperience(mContext)) return false;`.
+The desktop-like input retention branch in `FuseboxSessionState.activate()`
+instead pre-fills the current URL in the editor. For the requested Android
+phone behavior, these modes must not be mixed.
 
-Removed the older Omnibox-class-name hooks, which failed to install on
-the current Chrome build. This is an editor-state workaround, not yet a
-verified fix for Chromium's internal Fusebox session model or keyboard.
+**This test reverts the custom v0.4.18 focus-time URL restoration.** It removes
+two ineffective hooks that referenced R8-obfuscated
+`OmniboxCapabilities` / `OmniboxFeatures` classes, and leaves the
+Chromium-native current-page card and zero-prefix suggestions untouched.
+A resource-filtered, framework-only `TextView.onFocusChanged` trace remains.
 
-Diagnostic command after navigating and tapping the URL bar:
+No custom suggestion UI, private Chrome class mapping, synthetic Java-only
+suggestions, or replacement URL metadata is introduced. On a phone running
+this desktop APK, the card should appear if the release APK still registers
+`EditUrlSuggestionProcessor` and receives a first `what-you-typed` URL
+suggestion corresponding to the active tab. These are real runtime
+preconditions, not a guarantee. Test the actual UI, including Share,
+Copy, Edit, keyboard, changing tabs, and search input.
+
+To inspect focused text state without logging personal URLs:
 
 ```sh
 su -c 'logcat -d -v threadtime -b main | grep "DesktopChromeInit.*URLBAR" | tail -n 100'
 ```
 
-Expected: `recovery armed`, `text length=X->0`,
-`recovery candidate`, `recovery applied` and then
-`recovery-after-200ms length=X`. Test typing, selecting, navigating,
-new tabs and the keyboard. Do **not merge before device confirmation**.
+**Do not merge until confirmed on device and explicitly requested.**
 
 ## Chrome 158 compatibility (0.4.12)
 
