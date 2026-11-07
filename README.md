@@ -34,6 +34,21 @@ Verified structurally against:
 
 Chrome 155/156 and later are intended to work without new mappings as long as Chromium keeps the same underlying Extensions/Toolbar architecture. A semantic Chromium refactor can still require a module change; no implementation can guarantee compatibility with arbitrary future code changes.
 
+## Unpinned popup dismissal (0.4.14)
+
+The unpinned popup's temporary anchor can now be created by the
+`triggerPopup` bridge. On some phone window managers, however, its
+`AnchoredPopupWindow` does not dismiss on taps outside the extension popup.
+For **temporarily popped-out actions only**, the module configures Android's
+underlying `PopupWindow` as touch-modal and outside-touchable before loading
+the extension's popup contents. Pinned popups and DevTools inspect mode are
+left untouched. The temporary-action contents object matches the corresponding
+popup constructor, so only the intended popup is modified.
+
+Look for `unpinned popup dismissal: enabled outside-touch closing` in logcat
+to confirm the new hook applied. This is a targeted workaround for
+outside-tap dismissal; runtime verification on ColorOS is still required.
+
 ## Unpinned Extensions popup fix (0.4.13)
 
 Chromium 158's `ExtensionsToolbarBridge.triggerPopup()` has the Java
