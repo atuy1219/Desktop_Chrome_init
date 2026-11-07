@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.desktopchromeinit"
         minSdk = 29
         targetSdk = 35
-        versionCode = 41
-        versionName = "0.4.22-native-omnibox-view"
+        versionCode = 42
+        versionName = "0.4.23-native-card-actions"
     }
 
     signingConfigs {
