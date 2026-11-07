@@ -171,6 +171,7 @@ public final class ProbeEntry extends XposedModule {
 
         boolean physicalAlphabeticKeyboard = false;
         boolean physicalPrecisionPointer = false;
+        boolean inputDeviceScanSucceeded = false;
         int physicalDevices = 0;
         try {
             for (int id : InputDevice.getDeviceIds()) {
@@ -184,6 +185,7 @@ public final class ProbeEntry extends XposedModule {
                     physicalPrecisionPointer = true;
                 }
             }
+            inputDeviceScanSucceeded = true;
             emit("android.physicalInputDevices", physicalDevices, "ANDROID");
             emit("android.alphabeticKeyboard", physicalAlphabeticKeyboard, "ANDROID");
             emit("android.precisionPointer", physicalPrecisionPointer, "ANDROID");
@@ -241,22 +243,49 @@ public final class ProbeEntry extends XposedModule {
         // quietly report a source-derived value as an observed method result.
         Boolean desktop = asBoolean(actualDesktop);
         Boolean tablet = asBoolean(actualTablet);
-        if (tablet == null) tablet = resourceTablet;
         Boolean keyboard = asBoolean(actualKeyboard);
         Boolean pointer = asBoolean(actualPointer);
+        boolean usedAndroidFallback = false;
+
+        // DeviceInput in Chromium 158 takes exactly these values from
+        // physical Android InputDevice snapshots. If its R8-renamed class
+        // cannot be called, we can still reproduce those inputs directly.
+        if (tablet == null && resourceTablet != null) {
+            tablet = resourceTablet;
+            usedAndroidFallback = true;
+        }
+        if (tablet == null) {
+            // A conservative approximate fallback; Chromium uses a resource
+            // bucket, which may differ under custom per-display contexts.
+            tablet = config.smallestScreenWidthDp >= 600;
+            usedAndroidFallback = true;
+            emit("DERIVED.tabletConfigApproximation", tablet,
+                    "DERIVED_ANDROID_CONFIGURATION");
+        }
+        if (keyboard == null && inputDeviceScanSucceeded) {
+            keyboard = physicalAlphabeticKeyboard;
+            usedAndroidFallback = true;
+        }
+        if (pointer == null && inputDeviceScanSucceeded) {
+            pointer = physicalPrecisionPointer;
+            usedAndroidFallback = true;
+        }
 
         if (desktop != null && tablet != null
                 && keyboard != null && pointer != null) {
             boolean desktopExperience = desktop || (tablet && keyboard && pointer);
-            emit("DERIVED.hasDesktopExperience", desktopExperience,
-                    "DERIVED_CHROMIUM_158");
-            emit("DERIVED.isDesktopPlatform", desktop, "DERIVED_CHROMIUM_158");
+            String evidence = usedAndroidFallback
+                    ? "DERIVED_CHROMIUM_158_WITH_ANDROID_FALLBACK"
+                    : "DERIVED_CHROMIUM_158";
+            emit("DERIVED.hasDesktopExperience", desktopExperience, evidence);
+            emit("DERIVED.isDesktopPlatform", desktop, evidence);
             emit("DERIVED.hasPrecisionPointerExperience",
-                    desktop || (tablet && pointer), "DERIVED_CHROMIUM_158");
-            emit("DERIVED.areAnimationsEnabled", !desktop, "DERIVED_CHROMIUM_158");
+                    desktop || (tablet && pointer), evidence);
+            emit("DERIVED.areAnimationsEnabled", !desktop, evidence);
         } else {
             emit("DERIVED.hasDesktopExperience",
-                    "UNKNOWN: missing direct Chromium inputs", "UNAVAILABLE");
+                    "UNKNOWN: DeviceInfo.isDesktop or input evidence inaccessible",
+                    "UNAVAILABLE");
         }
 
         // Diagnostic only. The following defaults may be compiled differently
