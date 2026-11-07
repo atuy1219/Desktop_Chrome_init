@@ -9,8 +9,6 @@ import android.util.Log;
 import java.io.File;
 import java.util.LinkedHashSet;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Explicit module-library bootstrap for native Chrome diagnostics.
@@ -102,13 +100,19 @@ final class ChromeNativeProbe {
         // Chrome's private directories or arbitrary APK files.
         try {
             String desc = String.valueOf(ChromeNativeProbe.class.getClassLoader());
-            Matcher matcher = Pattern.compile("zip file \\"([^\\"]+\\.apk)\\"")
-                    .matcher(desc);
-            while (matcher.find()) {
-                String path = matcher.group(1);
-                if (path != null && path.contains("com.atuy.desktopchromeinit")) {
+            int offset = 0;
+            while (true) {
+                int prefix = desc.indexOf("zip file ", offset);
+                if (prefix < 0) break;
+                int quoteStart = desc.indexOf(34, prefix + 9);
+                if (quoteStart < 0) break;
+                int quoteEnd = desc.indexOf(34, quoteStart + 1);
+                if (quoteEnd < 0) break;
+                String path = desc.substring(quoteStart + 1, quoteEnd);
+                if (path.contains("com.atuy.desktopchromeinit")) {
                     addApkCandidate(candidates, path);
                 }
+                offset = quoteEnd + 1;
             }
         } catch (Throwable ignored) {}
 
