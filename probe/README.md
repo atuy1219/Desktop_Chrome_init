@@ -35,7 +35,12 @@ Every line is classified by evidence:
 - **ANDROID:** actual Android OS hardware/Configuration API value.
 - **CHROME_RESOURCE:** Chrome's own resource bucket, used for form factor.
 - **DERIVED_CHROMIUM_158:** source-derived evaluation of the stock Chromium
-  158 formula, using observed component values.
+  158 formula, using observed Chromium component values.
+- **DERIVED_CHROMIUM_158_WITH_ANDROID_FALLBACK:** same formula, but one or
+  more inputs were taken directly from Android's physical input device list or
+  Chrome's screen-width resources because R8 hid Chromium's Java method.
+- **DERIVED_ANDROID_CONFIGURATION:** approximate tablet classification from
+  Android screen configuration, not a direct Chromium return value.
 - **UNAVAILABLE:** an original Chromium class/method/field is R8-obfuscated,
   optimized away, not loaded, or inaccessible. This is **not** `false`.
 
