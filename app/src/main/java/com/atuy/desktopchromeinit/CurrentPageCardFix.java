@@ -413,7 +413,14 @@ final class CurrentPageCardFix {
         String title = callString(tab, "getTitle");
         if (TextUtils.isEmpty(title)) title = parsed.getHost();
         if (TextUtils.isEmpty(title)) return null;
-        Bitmap favicon = callBitmap(tab, "getFavicon");
+        Bitmap favicon = ChromeUiDiscovery.currentFavicon(
+                tab, activity.getClassLoader());
+        if (favicon == null) {
+            // Direct Tab.getFavicon is not present in Chromium 158: the image
+            // lives in a separate TabFavicon user-data helper, whose R8
+            // descriptor is resolved once per Chrome update.
+            favicon = callBitmap(tab, "getFavicon");
+        }
         return new Page(url, title, favicon);
     }
 
