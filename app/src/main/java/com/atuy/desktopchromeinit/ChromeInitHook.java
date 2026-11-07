@@ -230,6 +230,9 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             }
 
                             chromeClassLoader = loader;
+                            // One package-version-keyed background DEX survey.
+                            // No clipboard reads or browsing data at startup.
+                            ChromeUiDiscovery.start(context);
                             initializeChromeHooks(
                                     loader,
                                     context.getApplicationInfo(),
@@ -262,6 +265,8 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         // Supply an Android-view current-page card without changing Chrome's
         // Omnibox input, autocomplete candidates or platform identity.
         CurrentPageCardFix.install();
+        Application activeChrome = getCurrentApplication();
+        if (activeChrome != null) ChromeUiDiscovery.start(activeChrome);
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier
