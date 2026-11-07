@@ -78,61 +78,72 @@ after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
 
-## Extension-only mobile experience (unmerged test, 0.4.20)
+## Native-like current-page suggestion and measured Bottom Bar (0.4.21, TEST ONLY)
 
-> **Known failure on Chrome 158 Desktop APK:** v0.4.20 does **not** restore
-> the native current-page URL card. The native
-> `ZeroSuggestVerbatimMatchProvider::IsVerbatimMatchEligible()` returns
-> `false` for regular page contexts whenever
-> `BUILDFLAG(IS_DESKTOP_ANDROID)` is true. Removing Java Omnibox hooks does
-> not undo this native build-time gate. See
-> [mobile Chromium + extensions build proposal](docs/CHROMIUM_MOBILE_EXTENSIONS.md).
-> PR #21 must remain unmerged pending a real fix and device verification.
+Chromium 158 Desktop Android builds suppress the ordinary active-page URL
+verbatim result in `ZeroSuggestVerbatimMatchProvider` using
+`BUILDFLAG(IS_DESKTOP_ANDROID)`. Merely disabling Omnibox Java hooks cannot
+restore it. The stock Java `EditUrlSuggestionProcessor` needs that
+zero-prefix suggestion in position zero.
 
+`CurrentPageCardFix` provides a **native-like Android view** as the first
+row of Chrome's already-existing Omnibox suggestions container. It does not
+inject fake autocomplete results or change Chrome's URL editing or IME code.
 
+- When the unfocused URL bar gains focus and the input becomes empty, resolve
+  the current Chrome `Tab` and its **full** GURL. Do not use the shortened
+  displayed hostname as the clipboard/share/edit target.
+- On normal HTTP/HTTPS pages, show the page title (fallback: host), URL and
+  Share/Copy/Edit actions above the existing suggestion list.
+- Actions share through the Android chooser, copy the full URL, or refine the
+  URL bar for editing. A favicon is used when directly available from Tab;
+  otherwise an icon fallback is displayed.
+- Hide the extra row immediately when typing begins or the URL bar loses focus.
+- If current-tab URL resolution is unavailable due to R8 or an unexpected
+  Chrome refactor, fail closed and log a diagnostic instead of showing a
+  misleading URL or interfering with Chrome's autocomplete.
 
-**Purpose:** use Chrome Desktop Android's compiled extension engine while
-leaving the phone's normal Chrome UI and input behaviors untouched.
+**Limit:** this reproduces the UI and user actions but is not Chrome's
+native `EditUrlSuggestionProcessor`; native metrics and internal share-sheet
+integration are not claimed. Tests on the actual release APK are required.
+The implementation uses Android lifecycle/View APIs, Chrome resource IDs and
+validated runtime Tab getters, with structural reflection fallback instead
+of hard-coded obfuscated Java class names.
 
-The module installs **only extension-related hooks**. The previous Omnibox
-compatibility hooks and the temporary URL recovery hook have been removed.
-No platform identity spoofing or global `DeviceInfo.isDesktop()` override is
-performed. The phone's Android Bottom Bar, URL editing, suggestions, keyboard,
-back gesture, and tab navigation remain Chrome-owned.
+### Bottom Bar icon alignment
 
-Chrome 158 already includes the native `EditUrlSuggestionProcessor`. On
-non-desktop input devices, focusing an empty Omnibox may show the current
-page title, URL, favicon, and Share/Copy/Edit buttons as the first zero-prefix
-suggestion; the relevant `hasDesktopExperience()` test is not overridden.
+Chromium 158's `BottomBarView.applyDynamicDimensions()` changes native
+button padding when the bar height/top inset changes. Its
+`BottomBarConfigUtils.getBottomBarHeightDp()` clamps a requested height to
+**48–60 dp** and defaults to 56 dp. A requested 40 dp therefore does **not**
+produce a 40 dp Bottom Bar in this source version. The extension container
+originates from the tablet-only `extensions_toolbar_container.xml` and uses
+different height/margin attributes from native Bottom Bar buttons.
 
-**Build-time limitations.** A Desktop Android APK differs from a mobile APK
-before this LSPosed module loads. Chrome 158 has build-variant defaults:
+In 0.4.21, the module uses the **measured pixel height and the actual icon
+content-box center** of Chrome's `new_tab_button` (fallback: tab switcher or
+menu) to align the entire extension cluster vertically via translation Y.
+No static 40/56/60 dp offset or required flag value. The native bar's
+positions and slot widths are not moved. The Custom Tab-specific layout is
+unchanged.
 
-| Feature / path | Desktop build default | Extension dependency / decision |
-| --- | --- | --- |
-| `EnableAndroidSidePanel` | true | May be needed by extension side-panel API: do not disable blindly |
-| `ChromeNativeUrlOverriding` | true | The extensions URL override registry depends on it: **preserve** |
-| `UseWebUiNtpAndroid` | true | The WebUI NTP override additionally checks `DeviceInfo.isDesktop()` |
-| `WebUiAndroidTheming` | true | Shared WebUI theming; not disabled without testing extension pages |
-| Bookmark row display fallback | compact | Mobile layout requires a persisted preference or a Chromium-side change |
+Source references (exact version):
+- https://github.com/chromium/chromium/blob/158.0.8127.22/components/omnibox/browser/zero_suggest_verbatim_match_provider.cc
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/omnibox/java/src/org/chromium/chrome/browser/omnibox/suggestions/editurl/EditUrlSuggestionProcessor.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/bottombar/java/src/org/chromium/chrome/browser/ui/bottombar/BottomBarView.java
+- https://github.com/chromium/chromium/blob/158.0.8127.22/chrome/browser/ui/android/bottombar/java/src/org/chromium/chrome/browser/ui/bottombar/BottomBarConfigUtils.java
 
-On a normal phone, `DeviceInfo.isDesktop()` should already be false because
-the runtime device does not advertise `android.hardware.type.pc` (unless a
-desktop command-line override is active). Thus many Desktop-exclusive runtime
-paths are already inactive. Do not force it to true just to enable extensions.
+**Device checks before merge:**
+1. Tap address bar on a normal HTTPS page: editor remains empty; title, full
+   URL and Share/Copy/Edit appear at top, preceding other suggestions.
+2. Share, Copy and Edit use the **full** URL. Typing and blurring remove the
+   card cleanly, leaving native suggestions/keyboard working.
+3. Repeat with ordinary, incognito, loading, and native (new-tab) pages.
+4. Check 40, 48, 56 and 60 dp flag values, top/bottom address bar and
+   changed device font size. Compare Extensions vs new-tab glyph **center**.
+5. Check pinned/unpinned extension popups and temporary icon cleanup.
 
-**Strict meaning of “all Desktop elements removed”:** the module can leave
-mobile UX unchanged and avoid activating Desktop-only UI, but cannot strip
-compiled Desktop code or override every native build flag. Full parity would
-require a Chromium Android build with extensions explicitly enabled while
-using mobile build defaults.
-
-**Regression checks:** CI rejects reintroduction of hard-coded Omnibox
-class-name hooks or global desktop identity spoofing. This does not verify
-runtime behavior. Device tests must cover: editing the URL, current-page
-suggestion actions, keyboard, Back, normal tab switching, opening pinned and
-unpinned extensions, closing an extension popup, and extension URL overrides.
-No merge until these pass and the user explicitly requests it.
+PR #21 must remain **UNMERGED** until the user runs and accepts the device tests.
 
 ## Chrome 158 compatibility (0.4.12)
 
