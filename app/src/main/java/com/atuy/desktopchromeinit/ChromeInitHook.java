@@ -40,7 +40,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
     private static volatile ChromeDexResolver.Symbols resolvedSymbols;
     private static volatile Class<?> toolbarManagerClass;
 
-    private static final String BUILD_MARKER = "0.4.20-extensions-only-mobile-ui";
+    private static final String BUILD_MARKER = "0.4.21-native-page-card-bottom-bar";
     private static final Object INSTALL_LOCK = new Object();
     private static volatile boolean attachBootstrapInstalled;
     private static volatile boolean emergencyMenuGuardInstalled;
@@ -2112,6 +2112,19 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                 if (actionList != null) {
                     actionList.addOnLayoutChangeListener(listener);
                 }
+
+                // Native buttons change their padding as the Bottom Bar's
+                // measured height changes. Observe the actual layout rather
+                // than assuming a particular bottom_bar_height_dp value.
+                View reference = findNamedView(
+                        bottomBar,
+                        bottomBar.getResources(),
+                        "new_tab_button",
+                        "tab_switcher_button",
+                        "menu_button");
+                if (reference != null) {
+                    reference.addOnLayoutChangeListener(listener);
+                }
             }
 
             applyBottomBarEqualSlots(bottomBar, extensionsToolbar);
@@ -2267,8 +2280,75 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     }
                 }
             }
+
+            // Chromium BottomBarView.applyDynamicDimensions() uses padding to
+            // align native icons. The Extensions toolbar comes from
+            // extensions_toolbar_container.xml (tablet UI attributes), so
+            // MATCH_PARENT height alone is insufficient. Align the visual
+            // center of its menu glyph to a native icon, using measured
+            // coordinates and current padding. This supports 48/56/60 dp bars
+            // and any runtime toolbar-position/padding changes without
+            // reading or hardcoding the Finch flag parameter.
+            if (referenceButton != null && menuButton != null) {
+                bottomBar.post(() -> alignExtensionIconsToNativeButton(
+                        bottomBar, extensionsToolbar,
+                        referenceButton, menuButton));
+            }
         } catch (Throwable t) {
             log("bottom bar equal-slot apply failed: " + stackSummary(t));
+        }
+    }
+
+    private static void alignExtensionIconsToNativeButton(
+            LinearLayout bottomBar, LinearLayout extensionsToolbar,
+            View referenceButton, View menuButton) {
+        if (extensionsToolbar.getParent() != bottomBar
+                || bottomBar.getHeight() <= 0
+                || referenceButton.getHeight() <= 0
+                || menuButton.getHeight() <= 0
+                || !referenceButton.isShown()) {
+            return;
+        }
+
+        try {
+            int[] referencePosition = new int[2];
+            int[] menuPosition = new int[2];
+            referenceButton.getLocationInWindow(referencePosition);
+            menuButton.getLocationInWindow(menuPosition);
+
+            // Match center of the drawable's content box, not the midpoint
+            // of the View. BottomBarView dynamically changes its top/bottom
+            // padding when the bar is compact or its top inset is removed.
+            float referenceCenter = referencePosition[1]
+                    + (referenceButton.getHeight()
+                    + referenceButton.getPaddingTop()
+                    - referenceButton.getPaddingBottom()) / 2f;
+            float menuCenter = menuPosition[1]
+                    + (menuButton.getHeight()
+                    + menuButton.getPaddingTop()
+                    - menuButton.getPaddingBottom()) / 2f;
+
+            float oldTranslation = extensionsToolbar.getTranslationY();
+            float targetTranslation = oldTranslation + referenceCenter - menuCenter;
+
+            // A large displacement is evidence that the reference is in a
+            // different window/toolbar layout; do not jump the entire cluster
+            // across the screen on such a false positive.
+            float limit = bottomBar.getHeight() / 3f;
+            if (Math.abs(targetTranslation) > limit) {
+                return;
+            }
+            if (Math.abs(targetTranslation - oldTranslation) >= 0.5f) {
+                extensionsToolbar.setTranslationY(targetTranslation);
+                log("Bottom Bar glyph alignment: measuredHeightPx="
+                        + bottomBar.getHeight()
+                        + " referencePadding="
+                        + referenceButton.getPaddingTop() + "/"
+                        + referenceButton.getPaddingBottom()
+                        + " translationY=" + targetTranslation);
+            }
+        } catch (Throwable t) {
+            log("Bottom Bar glyph alignment failed: " + stackSummary(t));
         }
     }
 
