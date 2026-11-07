@@ -1,0 +1,40 @@
+name: Build read-only Chrome Desktop State Probe
+
+on:
+  pull_request:
+    paths:
+      - "probe/**"
+      - "settings.gradle.kts"
+      - ".github/workflows/chrome-desktop-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+      - name: Build probe APK
+        run: gradle :probe:assembleRelease --stacktrace
+      - name: Verify standalone APK
+        run: |
+          set -euo pipefail
+          APK="$(find probe/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' -print -quit)"
+          test -n "$APK"
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          cp "$APK" probe/build/ChromeDesktopStateProbe.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ChromeDesktopStateProbe
+          path: probe/build/ChromeDesktopStateProbe.apk
+          if-no-files-found: error

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Chrome Desktop State Probe</string>
+    <string name="module_description">Read-only Chromium desktop and Omnibox capability diagnostic. Logs boolean states without changing Chrome.</string>
+</resources>

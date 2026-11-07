@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "DesktopChromeInit"
 include(":app")
+include(":probe")
