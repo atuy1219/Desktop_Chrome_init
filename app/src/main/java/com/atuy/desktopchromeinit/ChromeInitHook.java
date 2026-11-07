@@ -129,6 +129,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
 
         chromeClassLoader = lpparam.classLoader;
         log("loading " + BUILD_MARKER + " into " + lpparam.processName);
+        // Second independent entry point: this path has already been proven
+        // functional on Vector. Logs carry the same DesktopChromeInit tag as
+        // the existing module, so an empty native-only grep is diagnosable.
+        android.util.Log.e(TAG, "NATIVE_PROBE 0.4.27 ChromeInitHook entered");
+        try {
+            ChromeNativeProbe.start("ChromeInitHook.handleLoadPackage");
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "NATIVE_PROBE handleLoadPackage FAILED", t);
+        }
 
         // Vector/LSPosed variants can expose an incomplete or null
         // LoadPackageParam.appInfo during the early legacy callback. Never make
@@ -147,6 +156,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     loader = lpparam.classLoader;
                 }
                 chromeClassLoader = loader;
+                try {
+                    ChromeNativeProbe.startWithContext(
+                            current, "currentApplication");
+                } catch (Throwable t) {
+                    android.util.Log.e(TAG, "NATIVE_PROBE currentApplication FAILED", t);
+                }
                 initializeChromeHooks(
                         loader,
                         current.getApplicationInfo(),
@@ -230,6 +245,12 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                             }
 
                             chromeClassLoader = loader;
+                            try {
+                                ChromeNativeProbe.startWithContext(
+                                        context, "Application.attach");
+                            } catch (Throwable t) {
+                                android.util.Log.e(TAG, "NATIVE_PROBE Application.attach FAILED", t);
+                            }
                             // One package-version-keyed background DEX survey.
                             // No clipboard reads or browsing data at startup.
                             ChromeUiDiscovery.start(context);
