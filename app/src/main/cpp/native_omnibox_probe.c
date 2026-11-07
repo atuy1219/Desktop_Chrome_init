@@ -61,7 +61,7 @@ static size_t align4(size_t value) {
     return (value + 3u) & ~((size_t)3u);
 }
 
-static bool segment_covers_note(const struct dl_phdr_info *info,
+static bool segment_covers_note(struct dl_phdr_info *info,
                                 uintptr_t note_begin, uintptr_t note_end) {
     for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *load = &info->dlpi_phdr[i];
@@ -73,7 +73,7 @@ static bool segment_covers_note(const struct dl_phdr_info *info,
     return false;
 }
 
-static int inspect_elf(const struct dl_phdr_info *info,
+static int inspect_elf(struct dl_phdr_info *info,
                        size_t ignored, void *context) {
     (void)ignored;
     const char *module = (const char *)context;
