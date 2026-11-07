@@ -258,9 +258,10 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // Extension-only policy: do not hook the native mobile Omnibox,
-        // keyboard, back gestures or Chrome's platform identity. The Desktop
-        // APK is used solely to expose its built-in extensions subsystem.
+        // Desktop C++ builds suppress the active-page zero-prefix suggestion.
+        // Supply an Android-view current-page card without changing Chrome's
+        // Omnibox input, autocomplete candidates or platform identity.
+        CurrentPageCardFix.install();
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier
