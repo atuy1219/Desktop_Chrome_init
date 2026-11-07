@@ -62,11 +62,13 @@ final class CurrentPageCardFix {
         final String url;
         final String title;
         final Bitmap favicon;
+        final Boolean offTheRecord;
 
-        Page(String url, String title, Bitmap favicon) {
+        Page(String url, String title, Bitmap favicon, Boolean offTheRecord) {
             this.url = url;
             this.title = title;
             this.favicon = favicon;
+            this.offTheRecord = offTheRecord;
         }
     }
 
@@ -197,7 +199,8 @@ final class CurrentPageCardFix {
             session.baselineTopPadding = dropdown.getPaddingTop();
             session.card = NativeOmniboxPageCard.build(
                     activity, (ViewGroup) dropdown,
-                    page.title, page.url, page.favicon, session.urlBar);
+                    page.title, page.url, page.favicon, session.urlBar,
+                    Boolean.TRUE.equals(page.offTheRecord));
             if (session.card == null) {
                 // If no native suggestion view can be constructed, use the fallback.
                 // Keep the feature usable, but copy the actual suggestion
@@ -421,7 +424,9 @@ final class CurrentPageCardFix {
             // descriptor is resolved once per Chrome update.
             favicon = callBitmap(tab, "getFavicon");
         }
-        return new Page(url, title, favicon);
+        Boolean offTheRecord = callBoolean(tab, "isOffTheRecord");
+        if (offTheRecord == null) offTheRecord = callBoolean(tab, "isIncognito");
+        return new Page(url, title, favicon, offTheRecord);
     }
 
     private static Object findActiveTab(Activity activity) {
@@ -540,6 +545,15 @@ final class CurrentPageCardFix {
                     && !TextUtils.isEmpty(uri.getHost());
         } catch (Throwable ignored) {
             return false;
+        }
+    }
+
+    private static Boolean callBoolean(Object object, String method) {
+        try {
+            Object result = object.getClass().getMethod(method).invoke(object);
+            return result instanceof Boolean ? (Boolean) result : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
