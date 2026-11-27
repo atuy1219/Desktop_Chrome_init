@@ -443,7 +443,9 @@ final class ChromeDexResolver {
         }
 
         short[] insns = dex.readCodeUnits(method.codeOffset);
-        for (int i = 0; i < insns.length; i++) {
+        for (int i = 0; i < insns.length;) {
+            int width = instructionWidth(insns, i);
+            if (width <= 0 || i + width > insns.length) break;
             int opcode = insns[i] & 0xff;
 
             // const-string vAA, string@BBBB
@@ -467,6 +469,7 @@ final class ChromeDexResolver {
                     return true;
                 }
             }
+            i += width;
         }
         return false;
     }
@@ -1451,6 +1454,127 @@ final class ChromeDexResolver {
         public String toString() {
             return source;
         }
+    }
+
+
+    /** Source-derived pair: edit-card eligibility and its desktop capability check. */
+    static final class OmniboxSymbols {
+        final String processorClass, processorMethod, matchClass;
+        final String capabilityClass, capabilityMethod;
+        OmniboxSymbols(String processorClass, String processorMethod, String matchClass,
+                String capabilityClass, String capabilityMethod) {
+            this.processorClass = processorClass;
+            this.processorMethod = processorMethod;
+            this.matchClass = matchClass;
+            this.capabilityClass = capabilityClass;
+            this.capabilityMethod = capabilityMethod;
+        }
+    }
+
+    static OmniboxSymbols resolveOmnibox(ApplicationInfo info) throws IOException {
+        List<DexFile> files = loadApplicationDexFiles(info);
+        Map<String, DexFile> owners = new HashMap<>();
+        for (DexFile dex : files) {
+            for (String owner : dex.classes.keySet()) owners.put(owner, dex);
+        }
+        OmniboxSymbols found = null;
+        for (DexFile dex : files) {
+            // Skip DEX files that do not contain the source's metric anchor.
+            if (!Arrays.asList(dex.strings).contains("Omnibox.EditUrlSuggestion.Tap")) continue;
+            for (ClassDef owner : dex.classes.values()) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                boolean tap = false, action = false;
+                for (MethodDef method : methods) {
+                    tap |= methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Tap");
+                    action |= methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Copy")
+                            || methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Edit");
+                    if (tap && action) break;
+                }
+                if (!tap || !action) continue;
+                for (MethodDef method : methods) {
+                    if ((method.accessFlags & ACC_STATIC) != 0 || method.codeOffset == 0) continue;
+                    MethodId id = dex.methods[method.methodIndex];
+                    Proto proto = dex.protos[id.protoIndex];
+                    String[] p = proto.parameterDescriptors;
+                    if (!BOOLEAN.equals(proto.returnDescriptor) || p.length != 2
+                            || !isObjectDescriptor(p[0]) || !INT.equals(p[1])) continue;
+                    // AutocompleteMatch is a JNI-backed class. Require its original
+                    // descriptor when available, otherwise refuse a different named type.
+                    if (owners.containsKey("Lorg/chromium/components/omnibox/AutocompleteMatch;")
+                            && !p[0].equals("Lorg/chromium/components/omnibox/AutocompleteMatch;")) continue;
+                    MethodId capability = null;
+                    short[] code = dex.readCodeUnits(method.codeOffset);
+                    for (int i = 0; i < code.length;) {
+                        int op = code[i] & 0xff;
+                        int width = instructionWidth(code, i);
+                        if (width <= 0 || i + width > code.length) break;
+                        if ((op == 0x71 || op == 0x77) && width == 3) {
+                            int index = code[i + 1] & 0xffff;
+                            if (index < dex.methods.length) {
+                                MethodId candidate = dex.methods[index];
+                                Proto cp = dex.protos[candidate.protoIndex];
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && Arrays.equals(cp.parameterDescriptors,
+                                                new String[]{"Landroid/content/Context;"})
+                                        && owners.containsKey(candidate.ownerDescriptor)) {
+                                    if (capability != null && capability != candidate) {
+                                        capability = null;
+                                        break;
+                                    }
+                                    capability = candidate;
+                                }
+                            }
+                        }
+                        i += width;
+                    }
+                    if (capability == null) continue;
+                    OmniboxSymbols next = new OmniboxSymbols(
+                            descriptorToClassName(owner.descriptor), id.name,
+                            descriptorToClassName(p[0]),
+                            descriptorToClassName(capability.ownerDescriptor), capability.name);
+                    if (found != null) throw new IOException("Ambiguous Omnibox processor/capability");
+                    found = next;
+                }
+            }
+        }
+        if (found == null) throw new IOException("Omnibox source anchors not uniquely resolved (possibly inlined)");
+        return found;
+    }
+
+    // DEX instruction widths in 16-bit code units. Do not mistake an operand
+    // or switch/array payload for an invoke-static opcode.
+    private static int instructionWidth(short[] code, int i) {
+        int unit = code[i] & 0xffff, op = unit & 0xff;
+        if (op == 0 && unit != 0) {
+            if (i + 1 >= code.length) return 0;
+            int count = code[i + 1] & 0xffff;
+            if (unit == 0x0100) return 4 + count * 2;
+            if (unit == 0x0200) return 2 + count * 4;
+            if (unit == 0x0300 && i + 3 < code.length) {
+                long size = (code[i + 2] & 0xffffL) | ((code[i + 3] & 0xffffL) << 16);
+                long width = 4 + (count * size + 1) / 2;
+                return width > Integer.MAX_VALUE ? 0 : (int) width;
+            }
+            return 0;
+        }
+        if (op == 0x18) return 5;
+        if (op == 0xfa || op == 0xfb) return 4;
+        if (op == 0x03 || op == 0x06 || op == 0x09 || op == 0x14 || op == 0x17
+                || op == 0x1b || op == 0x24 || op == 0x25 || op == 0x26
+                || op == 0x2a || op == 0x2b || op == 0x2c
+                || (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)
+                || op == 0xfc || op == 0xfd) return 3;
+        if (op == 0x02 || op == 0x05 || op == 0x08 || op == 0x13 || op == 0x15
+                || op == 0x16 || op == 0x19 || op == 0x1a || op == 0x1c
+                || op == 0x1f || op == 0x20 || op == 0x22 || op == 0x23
+                || op == 0x29 || (op >= 0x2d && op <= 0x3d)
+                || (op >= 0x44 && op <= 0x6d) || (op >= 0x90 && op <= 0xaf)
+                || (op >= 0xd0 && op <= 0xe2) || op == 0xfe || op == 0xff) return 2;
+        if (op == 0x00 || op == 0x01 || op == 0x04 || op == 0x07
+                || (op >= 0x0a && op <= 0x12) || op == 0x1d || op == 0x1e
+                || op == 0x21 || op == 0x27 || op == 0x28
+                || (op >= 0x7b && op <= 0x8f) || (op >= 0xb0 && op <= 0xcf)) return 1;
+        return 0;
     }
 
     private ChromeDexResolver() {}

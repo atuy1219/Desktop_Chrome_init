@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.chromemobilecompat"
         minSdk = 29
         targetSdk = 35
-        versionCode = 36
-        versionName = "0.5.1"
+        versionCode = 37
+        versionName = "0.5.2"
     }
 
     signingConfigs {

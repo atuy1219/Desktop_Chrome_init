@@ -261,7 +261,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         // These hooks avoid changing DeviceInfo.isDesktop() for the process.
         // They only affect Omnibox behavior on unsupported desktop-on-phone
         // installs and do not depend on the Extensions DEX resolver.
-        ChromeInputCompatibility.install(classLoader);
+        ChromeInputCompatibility.install(classLoader, appInfo);
 
         // Safety is deliberately independent from full feature resolution.
         // A semantic Chromium change may break ToolbarManager/Supplier

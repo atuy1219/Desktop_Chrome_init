@@ -2,6 +2,7 @@ package com.atuy.chromemobilecompat;
 
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.util.Log;
 
@@ -25,65 +26,81 @@ final class ChromeInputCompatibility {
     private static volatile boolean editUrlProcessorHooked;
     private static final ThreadLocal<Integer> EDIT_URL_DEPTH = new ThreadLocal<>();
     private static volatile boolean keyboardDebounceHooked;
+    private static ChromeDexResolver.OmniboxSymbols resolvedOmnibox;
+    private static boolean dexResolutionAttempted;
 
     private ChromeInputCompatibility() {}
 
-    static synchronized void install(ClassLoader loader) {
+    static synchronized void install(ClassLoader loader, ApplicationInfo appInfo) {
         if (loader == null) return;
-        if (!desktopExperienceHooked) {
+        if (!desktopExperienceHooked || !editUrlProcessorHooked) {
             try {
-                Class<?> cls = Class.forName(
-                        "org.chromium.components.omnibox.OmniboxCapabilities",
-                        false, loader);
-                Method method = cls.getDeclaredMethod("hasDesktopExperience", Context.class);
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (param.args == null || param.args.length != 1
-                                || !(param.args[0] instanceof Context)) return;
-                        Context context = (Context) param.args[0];
-                        if (!shouldUseMobileOmnibox(context)) return;
-                        // Preserve the established desktop focus flow. Only the
-                        // current-page processor may opt into mobile presentation.
-                        // Native zero-prefix match generation is independent.
-                        Integer depth = EDIT_URL_DEPTH.get();
-                        param.setResult(depth == null || depth == 0);
+                Method capability, eligibility;
+                try {
+                    Class<?> cls = Class.forName(
+                            "org.chromium.components.omnibox.OmniboxCapabilities", false, loader);
+                    capability = cls.getDeclaredMethod("hasDesktopExperience", Context.class);
+                    Class<?> processor = Class.forName(
+                            "org.chromium.chrome.browser.omnibox.suggestions.editurl.EditUrlSuggestionProcessor",
+                            false, loader);
+                    Class<?> match = Class.forName(
+                            "org.chromium.components.omnibox.AutocompleteMatch", false, loader);
+                    eligibility = processor.getDeclaredMethod("doesProcessSuggestion", match, int.class);
+                } catch (ReflectiveOperationException missing) {
+                    if (resolvedOmnibox == null && !dexResolutionAttempted && appInfo != null) {
+                        dexResolutionAttempted = true;
+                        resolvedOmnibox = ChromeDexResolver.resolveOmnibox(appInfo);
                     }
-                });
-                desktopExperienceHooked = true;
-                log("Omnibox focus compatibility hook installed");
-            } catch (Throwable t) {
-                log("Omnibox focus compatibility hook unavailable: " + t);
-            }
-        }
+                    if (resolvedOmnibox == null) throw missing;
+                    ChromeDexResolver.OmniboxSymbols s = resolvedOmnibox;
+                    capability = Class.forName(s.capabilityClass, false, loader)
+                            .getDeclaredMethod(s.capabilityMethod, Context.class);
+                    eligibility = Class.forName(s.processorClass, false, loader)
+                            .getDeclaredMethod(s.processorMethod,
+                                    Class.forName(s.matchClass, false, loader), int.class);
+                    log("Omnibox DEX symbols resolved: " + capability + " / " + eligibility);
+                }
+                if (capability.getReturnType() != boolean.class
+                        || !java.lang.reflect.Modifier.isStatic(capability.getModifiers())
+                        || eligibility.getReturnType() != boolean.class
+                        || java.lang.reflect.Modifier.isStatic(eligibility.getModifiers())) {
+                    throw new IllegalStateException("Omnibox signature mismatch");
+                }
+                if (!editUrlProcessorHooked) {
+                    XposedBridge.hookMethod(eligibility, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Integer depth = EDIT_URL_DEPTH.get();
+                            EDIT_URL_DEPTH.set(depth == null ? 1 : depth + 1);
+                        }
 
-        if (desktopExperienceHooked && !editUrlProcessorHooked) {
-            try {
-                Class<?> processor = Class.forName(
-                        "org.chromium.chrome.browser.omnibox.suggestions.editurl.EditUrlSuggestionProcessor",
-                        false, loader);
-                Class<?> match = Class.forName(
-                        "org.chromium.components.omnibox.AutocompleteMatch", false, loader);
-                Method method = processor.getDeclaredMethod(
-                        "doesProcessSuggestion", match, int.class);
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        Integer depth = EDIT_URL_DEPTH.get();
-                        EDIT_URL_DEPTH.set(depth == null ? 1 : depth + 1);
-                    }
-
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        Integer depth = EDIT_URL_DEPTH.get();
-                        if (depth == null || depth <= 1) EDIT_URL_DEPTH.remove();
-                        else EDIT_URL_DEPTH.set(depth - 1);
-                    }
-                });
-                editUrlProcessorHooked = true;
-                log("Scoped mobile EditUrlSuggestionProcessor hook installed");
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            Integer depth = EDIT_URL_DEPTH.get();
+                            if (depth == null || depth <= 1) EDIT_URL_DEPTH.remove();
+                            else EDIT_URL_DEPTH.set(depth - 1);
+                        }
+                    });
+                    editUrlProcessorHooked = true;
+                }
+                if (!desktopExperienceHooked) {
+                    XposedBridge.hookMethod(capability, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.args == null || param.args.length != 1
+                                    || !(param.args[0] instanceof Context)) return;
+                            Context context = (Context) param.args[0];
+                            if (!shouldUseMobileOmnibox(context)) return;
+                            Integer depth = EDIT_URL_DEPTH.get();
+                            // Preserve the existing focus workaround outside the card.
+                            param.setResult(depth == null || depth == 0);
+                        }
+                    });
+                    desktopExperienceHooked = true;
+                }
+                log("Scoped Omnibox compatibility hooks installed");
             } catch (Throwable t) {
-                log("Scoped edit URL processor unavailable (native behavior retained): " + t);
+                log("Omnibox compatibility unresolved; no broad capability override: " + t);
             }
         }
 
