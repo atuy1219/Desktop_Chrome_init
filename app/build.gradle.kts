@@ -10,8 +10,9 @@ android {
         applicationId = "com.atuy.chromemobilecompat"
         minSdk = 29
         targetSdk = 35
-        versionCode = 37
-        versionName = "0.5.2"
+        versionCode = 38
+        versionName = "0.5.3-native-probe"
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {
@@ -28,6 +29,10 @@ android {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("ci")
         }
+    }
+
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
 
     compileOptions {

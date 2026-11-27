@@ -35,8 +35,8 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Test native source patch
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - name: Validate native ELF inventory
+        run: python3 -m py_compile tools/inspect_chrome_native.py
 
       - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
@@ -63,6 +63,24 @@ jobs:
           fi
 
           "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          unzip -Z -1 "$APK" | grep -Fx 'lib/arm64-v8a/libchrome_omnibox_probe.so'
+          unzip -p "$APK" 'META-INF/xposed/native_init.list' | grep -Fx 'libchrome_omnibox_probe.so'
+          unzip -p "$APK" 'lib/arm64-v8a/libchrome_omnibox_probe.so' > "$RUNNER_TEMP/probe.so"
+          READELF="$(find "$ANDROID_HOME/ndk" -path '*/bin/llvm-readelf' -type f | sort | tail -1)"
+          if [ -z "$READELF" ]; then READELF="$(command -v readelf)"; fi
+          "$READELF" -Ws "$RUNNER_TEMP/probe.so" > "$RUNNER_TEMP/probe-symbols.txt"
+          grep -F 'Java_com_atuy_chromemobilecompat_ChromeNativeProbe_nativeSnapshot' "$RUNNER_TEMP/probe-symbols.txt"
+          grep -F 'JNI_OnLoad' "$RUNNER_TEMP/probe-symbols.txt"
+          grep -E '[[:space:]]native_init
+          ls -lh app/build/outputs/ChromeMobileCompat-release.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ChromeMobileCompat-release
+          path: app/build/outputs/ChromeMobileCompat-release.apk
+          if-no-files-found: error
+ "$RUNNER_TEMP/probe-symbols.txt"
 
           cp "$APK" app/build/outputs/ChromeMobileCompat-release.apk
           ls -lh app/build/outputs/ChromeMobileCompat-release.apk

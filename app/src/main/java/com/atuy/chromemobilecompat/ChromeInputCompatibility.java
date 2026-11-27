@@ -92,8 +92,9 @@ final class ChromeInputCompatibility {
                             Context context = (Context) param.args[0];
                             if (!shouldUseMobileOmnibox(context)) return;
                             Integer depth = EDIT_URL_DEPTH.get();
-                            // Preserve the existing focus workaround outside the card.
-                            param.setResult(depth == null || depth == 0);
+                            // Never change the original focus/device result outside
+                            // the edit-card eligibility call.
+                            if (depth != null && depth > 0) param.setResult(false);
                         }
                     });
                     desktopExperienceHooked = true;

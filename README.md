@@ -2,15 +2,19 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
-## 0.5.2: source-based compatibility
+## 0.5.3-native-probe (test only)
 
-- New application ID: `com.atuy.chromemobilecompat`. Disable/uninstall the old `com.atuy.desktopchromeinit` module, install this module, enable it and scope it to `com.android.chrome`. Do not run both modules together.
-- Restores the previous desktop focus compatibility behavior after 0.5.0 regressed the current-page card and IME on Chrome 159.0.8154.18. Only within the original EditUrlSuggestionProcessor eligibility method is mobile experience reported, if its runtime symbols resolve. All native eligibility checks remain intact.
-- Chrome 159's ZeroSuggestVerbatimMatchProvider rejects ordinary web pages at compile time for Desktop Android; its AutocompleteClassifier also excludes kClipboard. Both native paths require exact APK/native analysis. The scoped Java hook cannot create missing matches. No synthetic clipboard entries or polling are introduced.
-- Bottom Bar: align extension icons using actual native button vertical padding (including asymmetric padding when the bottom omnibox is active). Clear inherited vertical container margins; retain the existing single-slot layout and extension popup behavior.
-- Omnibox eligibility and capability hooks now fall back to DEX discovery using the original edit-card metrics and the static Context-to-boolean call within the eligibility method. If absent, inlined, or ambiguous, the capability override is not installed. No versionCode or R8 mapping table is used.
-- For a source-built Desktop Chromium, run `python3 tools/patch_chromium_omnibox.py /path/to/chromium/src` before building. This enables the native verbatim and clipboard providers and mobile zero-prefix grouping on non-PC Android devices; it does not modify a prebuilt Google Chrome APK. See `tools/README.md`.
-- Existing IME debounce workaround retained. Source-validated against Chromium 159.0.8154.18; device verification and runtime symbol validation required. No shortcut changes.
+- Official Google Chrome APK remains unchanged; no source rebuild, no synthetic suggestion UI.
+- Integrates PR #21's read-only ELF diagnostic using libxposed 102's getModuleApplicationInfo() instead of PackageManager/classloader string heuristics. Explicit JNI load is independent of optional native_init callback support.
+- The Omnibox desktop capability override now applies only inside the actual edit-card eligibility method. All other calls retain their original result. Existing IME workaround and extension layout hooks remain.
+- Native candidate generation and zero-prefix grouping are separate compiled-out paths. No native patch is installed yet. The diagnostic records actual mapped Chrome ELF build IDs and symbol visibility; absent symbols are not guessed. No URL, page text or clipboard contents are read.
+- Install the test build (disable old com.atuy.desktopchromeinit), enable and scope com.atuy.chromemobilecompat to com.android.chrome, force-stop Chrome and launch. After opening Omnibox, run:
+
+```sh
+su -c 'logcat -d -v threadtime -b main | grep -E "ChromeNativeOmnibox|ChromeMobileCompat.*NATIVE_PROBE" | tail -n 120'
+```
+
+- Offline analysis: `python3 tools/inspect_chrome_native.py <apk> [more APKs...]`. Include the Trichrome library package if Chrome uses one. Do not merge until real-device verification.
 
 ## Compatibility model
 
@@ -104,7 +108,7 @@ APK build alone does not prove the Extensions popup is working.
 On unsupported phone devices that install the Desktop Android Chrome APK, the
 module additionally attempts two isolated Omnibox hooks:
 
-- `OmniboxCapabilities.hasDesktopExperience(Context)`: historical 0.4.12 workaround retained the URL. Restored with a scoped presentation exception in 0.5.1; the global desktop identity remains untouched.
+- `OmniboxCapabilities.hasDesktopExperience(Context)`: historical 0.4.12 workaround retained the URL. Limited to the card eligibility call in 0.5.3; the global desktop identity remains untouched.
 - `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled()`: disable the
   internal 150 ms IME visibility debounce and use immediate show/hide requests
   instead. This is an experimental workaround for stale keyboard state; it

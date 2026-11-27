@@ -45,6 +45,7 @@ public final class ModernEntry extends XposedModule {
                 + " api=" + getApiVersion());
 
         if (TARGET_PACKAGE.equals(processName)) {
+            startNativeProbe("module-loaded");
             scheduleRetry(0L);
         }
     }
@@ -72,7 +73,18 @@ public final class ModernEntry extends XposedModule {
         latestApplicationInfo = param.getApplicationInfo();
         e("onPackageReady loader=" + latestClassLoader
                 + " appInfo=" + (latestApplicationInfo != null));
+        startNativeProbe("package-ready");
         tryInstall("onPackageReady");
+    }
+
+    private void startNativeProbe(String phase) {
+        try {
+            // libxposed API 102 provides the real module APK and native paths.
+            // No package-visibility lookup or classloader string guessing.
+            ChromeNativeProbe.start(getModuleApplicationInfo(), phase);
+        } catch (Throwable t) {
+            e("NATIVE_PROBE bootstrap unavailable: " + t.getClass().getSimpleName());
+        }
     }
 
     private boolean isTarget(String packageName, boolean firstPackage) {
