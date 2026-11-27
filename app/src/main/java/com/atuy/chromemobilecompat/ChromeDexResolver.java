@@ -1641,10 +1641,104 @@ final class ChromeDexResolver {
                 }
             }
         }
-        if (exact.size() == 1) return exact.get(0);
-        if (exact.isEmpty() && named.size() == 1) return named.get(0);
-        throw new IOException("TabFavicon candidates exact=" + exact.size()
-                + " named=" + named.size());
+        String[] selected = exact.size() == 1 ? exact.get(0)
+                : exact.isEmpty() && named.size() == 1 ? named.get(0) : null;
+        // Independent native local DB path. Resolve a named helper or a
+        // call site in TabFavicon's verified async method; never guess between
+        // the identical local and foreign favicon signatures.
+        String[] local = findLocalFavicon(dexes, selected);
+        if (selected == null && local == null) {
+            throw new IOException("TabFavicon candidates exact=" + exact.size()
+                    + " named=" + named.size() + "; local helper unresolved");
+        }
+        String[] result = selected == null ? new String[8] : Arrays.copyOf(selected, 8);
+        if (local != null) System.arraycopy(local, 0, result, 5, 3);
+        return result;
+    }
+
+    private static boolean localFaviconShape(Proto p) {
+        String[] a = p.parameterDescriptors;
+        return BOOLEAN.equals(p.returnDescriptor) && a.length == 5
+                && isObjectDescriptor(a[0]) && "Lorg/chromium/url/GURL;".equals(a[1])
+                && INT.equals(a[2]) && BOOLEAN.equals(a[3]) && isObjectDescriptor(a[4]);
+    }
+
+    private static String[] findLocalFavicon(List<DexFile> dexes, String[] selected) {
+        final String namedOwner = "Lorg/chromium/chrome/browser/ui/favicon/FaviconHelper;";
+        ArrayList<String[]> candidates = new ArrayList<>();
+        for (DexFile dex : dexes) {
+            ClassDef owner = dex.classes.get(namedOwner);
+            if (owner == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(owner)) {
+                MethodId m = dex.methods[def.methodIndex];
+                if ("getLocalFaviconImageForURL".equals(m.name)
+                        && (def.accessFlags & ACC_STATIC) == 0
+                        && localFaviconShape(dex.protos[m.protoIndex])) {
+                    String[] entry = localEntry(dex, owner, m.name);
+                    if (entry != null) candidates.add(entry);
+                }
+            }
+        }
+        if (candidates.size() == 1) return candidates.get(0);
+        if (selected == null || selected[0] == null || selected[4] == null) return null;
+        String desc = "L" + selected[0].replace('.', '/') + ";";
+        for (DexFile dex : dexes) {
+            ClassDef caller = dex.classes.get(desc);
+            if (caller == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(caller)) {
+                MethodId m = dex.methods[def.methodIndex];
+                if (!selected[4].equals(m.name) || def.codeOffset == 0) continue;
+                short[] code = dex.readCodeUnits(def.codeOffset);
+                for (int i = 0; i < code.length;) {
+                    int width = instructionWidth(code, i);
+                    if (width <= 0 || i + width > code.length) break;
+                    int op = code[i] & 0xff;
+                    if (op == 0x6e || op == 0x74) {
+                        int mi = code[i + 1] & 0xffff;
+                        if (mi < dex.methods.length) {
+                            MethodId called = dex.methods[mi];
+                            if (localFaviconShape(dex.protos[called.protoIndex])) {
+                                for (DexFile targetDex : dexes) {
+                                    ClassDef target = targetDex.classes.get(called.ownerDescriptor);
+                                    if (target == null) continue;
+                                    String[] entry = localEntry(targetDex, target, called.name);
+                                    if (entry != null && candidates.stream().noneMatch(
+                                            old -> Arrays.equals(old, entry))) candidates.add(entry);
+                                }
+                            }
+                        }
+                    }
+                    i += width;
+                }
+            }
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    private static String[] localEntry(DexFile dex, ClassDef owner, String method) {
+        int constructors = 0, destroyCount = 0, requests = 0;
+        String destroy = null, namedDestroy = null;
+        for (MethodDef def : dex.getDefinedMethods(owner)) {
+            if ((def.accessFlags & ACC_STATIC) != 0) continue;
+            MethodId m = dex.methods[def.methodIndex];
+            Proto p = dex.protos[m.protoIndex];
+            if (m.name.equals(method) && localFaviconShape(p)) requests++;
+            if ("V".equals(p.returnDescriptor) && p.parameterDescriptors.length == 0) {
+                if ("<init>".equals(m.name)) constructors++;
+                else {
+                    destroy = m.name;
+                    destroyCount++;
+                    if ("destroy".equals(m.name)) namedDestroy = m.name;
+                }
+            }
+        }
+        if (constructors != 1 || requests != 1) return null;
+        boolean nativePtr = false;
+        for (FieldId f : dex.getDefinedFields(owner)) if ("J".equals(f.typeDescriptor)) nativePtr = true;
+        if (!nativePtr) return null;
+        String cleanup = namedDestroy != null ? namedDestroy : destroyCount == 1 ? destroy : null;
+        return cleanup == null ? null : new String[]{descriptorToClassName(owner.descriptor),
+                method, cleanup};
     }
 
     private static boolean constructsOwner(DexFile dex, MethodDef method, String owner) {

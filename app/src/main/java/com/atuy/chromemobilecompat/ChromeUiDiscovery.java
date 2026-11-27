@@ -33,7 +33,7 @@ final class ChromeUiDiscovery {
     private static final String KEY_SCHEMA = "uiDiscoverySchema";
     // Increment when the module changes discovery logic. Re-scan on the
     // next Chrome start even if the official Chrome version stays the same.
-    private static final int DISCOVERY_SCHEMA = 3;
+    private static final int DISCOVERY_SCHEMA = 4;
     private static final String KEY_FAV_CLASS = "faviconClass";
     private static final String KEY_FAV_METHOD = "faviconMethod";
 
@@ -41,6 +41,7 @@ final class ChromeUiDiscovery {
     private static volatile String faviconMethod;
     private static volatile String faviconFrom;
     private static volatile String faviconAsync;
+    private static volatile String localClass, localMethod, localDestroy;
     private static volatile boolean starting;
 
     static synchronized void start(Context context) {
@@ -86,7 +87,11 @@ final class ChromeUiDiscovery {
 
         if (prefs.getLong(KEY_VERSION, -1) == version
                 && prefs.getInt(KEY_SCHEMA, -1) == DISCOVERY_SCHEMA
-                && prefs.getString(KEY_FAV_METHOD, null) != null) {
+                && (prefs.getString(KEY_FAV_METHOD, null) != null
+                    || prefs.getString("localMethod", null) != null)) {
+            localClass = prefs.getString("localClass", null);
+            localMethod = prefs.getString("localMethod", null);
+            localDestroy = prefs.getString("localDestroy", null);
             faviconClass = prefs.getString(KEY_FAV_CLASS, null);
             faviconFrom = prefs.getString("faviconFrom", null);
             faviconAsync = prefs.getString("faviconAsync", null);
@@ -107,6 +112,9 @@ final class ChromeUiDiscovery {
                 faviconFrom = favicon[3];
                 faviconAsync = favicon[4];
                 faviconMethod = favicon[1];
+                localClass = favicon[5];
+                localMethod = favicon[6];
+                localDestroy = favicon[7];
             } catch (Throwable error) {
                 XposedBridge.log("UI discovery: favicon getter unavailable: "
                         + error.getClass().getSimpleName()
@@ -120,10 +128,14 @@ final class ChromeUiDiscovery {
                     .putString(KEY_FAV_METHOD, favicon == null ? null : favicon[1])
                     .putString("faviconFrom", favicon == null ? null : favicon[3])
                     .putString("faviconAsync", favicon == null ? null : favicon[4])
+                    .putString("localClass", favicon == null ? null : favicon[5])
+                    .putString("localMethod", favicon == null ? null : favicon[6])
+                    .putString("localDestroy", favicon == null ? null : favicon[7])
                     .apply();
             XposedBridge.log("UI discovery: completed Chrome version=" + version
                     + " faviconAccessor=" + (favicon != null)
                     + " asyncFavicon=" + (faviconAsync != null)
+                    + " localDb=" + (localMethod != null)
                     + " nativeOmniboxFactories=resolved-when-dropdown-attaches");
             if (favicon != null) {
                 new Handler(Looper.getMainLooper()).post(
@@ -173,7 +185,109 @@ final class ChromeUiDiscovery {
         }
     }
 
-    static void requestFavicon(Object tab, ClassLoader loader, Consumer<Bitmap> result) {
+    static void requestFavicon(Object tab, ClassLoader loader, Object gurl,
+            int size, Consumer<Bitmap> result) {
+        if (tab == null) return;
+        if (requestLocalFavicon(tab, loader, gurl, size, result)) return;
+        requestTabFavicon(tab, loader, result);
+    }
+
+    private static boolean requestLocalFavicon(Object tab, ClassLoader loader, Object gurl,
+            int size, Consumer<Bitmap> result) {
+        if (gurl == null) return false;
+        Object helper = null;
+        Method cleanup = null;
+        try {
+            String ownerName = localClass != null ? localClass :
+                    "org.chromium.chrome.browser.ui.favicon.FaviconHelper";
+            ClassLoader tabLoader = tab.getClass().getClassLoader();
+            Class<?> owner = Class.forName(ownerName, false, tabLoader != null ? tabLoader : loader);
+            String methodName = localMethod != null ? localMethod : "getLocalFaviconImageForURL";
+            List<Method> methods = new ArrayList<>();
+            for (Method m : owner.getDeclaredMethods()) {
+                Class<?>[] p = m.getParameterTypes();
+                if (m.getName().equals(methodName) && !Modifier.isStatic(m.getModifiers())
+                        && m.getReturnType() == boolean.class && p.length == 5
+                        && p[1].isInstance(gurl) && p[2] == int.class && p[3] == boolean.class
+                        && p[4].isInterface()) methods.add(m);
+            }
+            if (methods.size() != 1) return false;
+            Method request = methods.get(0);
+            Class<?>[] p = request.getParameterTypes();
+            // Profile is taken only from this tab. Never fall back to a global
+            // regular profile, particularly for incognito or custom tabs.
+            List<Method> getters = new ArrayList<>();
+            for (Method m : tab.getClass().getMethods()) {
+                if (!Modifier.isStatic(m.getModifiers()) && m.getParameterCount() == 0
+                        && p[0].isAssignableFrom(m.getReturnType())) getters.add(m);
+            }
+            Method profileGetter = null;
+            for (Method m : getters) if ("getProfile".equals(m.getName())) profileGetter = m;
+            if (profileGetter == null && getters.size() == 1) profileGetter = getters.get(0);
+            if (profileGetter == null) return false;
+            profileGetter.setAccessible(true);
+            Object profile = profileGetter.invoke(tab);
+            if (profile == null || !p[0].isInstance(profile)) return false;
+            int callbacks = 0;
+            for (Method m : p[4].getMethods()) {
+                if (!Modifier.isAbstract(m.getModifiers())) continue;
+                Class<?>[] args = m.getParameterTypes();
+                if (m.getReturnType() != void.class || args.length != 2
+                        || args[0] != Bitmap.class || args[1] != p[1]) return false;
+                callbacks++;
+            }
+            if (callbacks != 1) return false;
+            cleanup = owner.getDeclaredMethod(localDestroy != null ? localDestroy : "destroy");
+            if (Modifier.isStatic(cleanup.getModifiers()) || cleanup.getReturnType() != void.class)
+                return false;
+            cleanup.setAccessible(true);
+            java.lang.reflect.Constructor<?> ctor = owner.getDeclaredConstructor();
+            ctor.setAccessible(true);
+            helper = ctor.newInstance();
+            final Object instance = helper;
+            final Method destroy = cleanup;
+            final Handler main = new Handler(Looper.getMainLooper());
+            final java.util.concurrent.atomic.AtomicBoolean finished =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            Runnable release = () -> {
+                if (!finished.compareAndSet(false, true)) return;
+                try { destroy.invoke(instance); }
+                catch (Throwable ignored) {}
+            };
+            Object cb = Proxy.newProxyInstance(p[4].getClassLoader(), new Class<?>[]{p[4]},
+                    (proxy, m, args) -> {
+                        if (m.getDeclaringClass() == Object.class) {
+                            if ("hashCode".equals(m.getName())) return System.identityHashCode(proxy);
+                            if ("equals".equals(m.getName())) return proxy == args[0];
+                            return "ChromeMobileCompat local favicon callback";
+                        }
+                        Bitmap image = args != null && args.length == 2 && args[0] instanceof Bitmap
+                                ? (Bitmap) args[0] : null;
+                        main.post(() -> {
+                            if (finished.get()) return;
+                            release.run();
+                            if (OmniboxIcons.valid(image)) result.accept(image);
+                            else requestTabFavicon(tab, loader, result);
+                        });
+                        return null;
+                    });
+            request.setAccessible(true);
+            boolean accepted = Boolean.TRUE.equals(request.invoke(instance, profile, gurl,
+                    size, false, cb));
+            if (!accepted) { release.run(); return false; }
+            main.postDelayed(release, 5000);
+            XposedBridge.log("Favicon: direct Chrome local DB request accepted");
+            return true;
+        } catch (Throwable failure) {
+            if (helper != null && cleanup != null) {
+                try { cleanup.invoke(helper); } catch (Throwable ignored) {}
+            }
+            XposedBridge.log("Favicon: direct local DB path unavailable", failure);
+            return false;
+        }
+    }
+
+    private static void requestTabFavicon(Object tab, ClassLoader loader, Consumer<Bitmap> result) {
         if (tab == null) return;
         try {
             Class<?> owner = faviconOwner(tab, loader);

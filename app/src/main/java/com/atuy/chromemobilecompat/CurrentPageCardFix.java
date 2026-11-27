@@ -79,6 +79,7 @@ final class CurrentPageCardFix {
         ViewGroup dropdown;
         FrameLayout suggestionContainer;
         ViewGroup card;
+        ImageView pageIcon;
         int baselineTopPadding;
         int cardHeight;
         int reservedHeight;
@@ -238,11 +239,18 @@ final class CurrentPageCardFix {
             session.dropdown = (ViewGroup) dropdown;
             session.suggestionContainer = (FrameLayout) dropdown.getParent();
             session.baselineTopPadding = dropdown.getPaddingTop();
-            session.card = NativeOmniboxPageCard.build(
+            final int sideSpacing = NativeOmniboxPageCard.dimension(
+                    activity, "omnibox_suggestion_side_spacing_smallest", 8);
+            final int nativeRowWidth = Math.max(
+                    dp(activity, 140), dropdown.getWidth() - 2 * sideSpacing);
+            NativeOmniboxPageCard.RenderedCard rendered = NativeOmniboxPageCard.build(
                     activity, (ViewGroup) dropdown,
                     page.title, page.url, page.favicon, session.urlBar,
-                    Boolean.TRUE.equals(page.offTheRecord));
-            if (session.card == null) {
+                    Boolean.TRUE.equals(page.offTheRecord), nativeRowWidth);
+            if (rendered != null) {
+                session.card = rendered.row;
+                session.pageIcon = rendered.pageIcon;
+            } else {
                 // If no native suggestion view can be constructed, use the fallback.
                 // Keep the feature usable, but copy the actual suggestion
                 // colors/background rather than applying unrelated Android
@@ -252,10 +260,6 @@ final class CurrentPageCardFix {
                         (ViewGroup) dropdown, session.card);
                 XposedBridge.log("Current-page card: native row unavailable; "
                         + "styled fallback based on Chrome's own suggestion row");
-            }
-            final ImageView pageIcon = firstImage(session.card, 0);
-            if (pageIcon != null && !OmniboxIcons.valid(page.favicon)) {
-                requestPageFavicon(session, activity, page, pageIcon);
             }
             // An actual Chromium clipboard suggestion is already handled by
             // the normal RecyclerView. Only supply a native-view fallback when
@@ -278,10 +282,6 @@ final class CurrentPageCardFix {
                 cardGroup.addView(clipboardCard, clipboardParams);
                 session.card = cardGroup;
             }
-            final int sideSpacing = NativeOmniboxPageCard.dimension(
-                    activity, "omnibox_suggestion_side_spacing_smallest", 8);
-            final int nativeRowWidth = Math.max(
-                    dp(activity, 140), dropdown.getWidth() - 2 * sideSpacing);
             session.card.measure(
                     View.MeasureSpec.makeMeasureSpec(nativeRowWidth,
                             View.MeasureSpec.EXACTLY),
@@ -305,6 +305,12 @@ final class CurrentPageCardFix {
                     dropdown.getPaddingEnd(), dropdown.getPaddingBottom());
             session.card.setElevation(dp(activity, 1));
             session.card.bringToFront();
+            // Start async favicon work after the actual row is attached.
+            XposedBridge.log("Current-page favicon: initialBitmap="
+                    + OmniboxIcons.valid(page.favicon) + " target=" + (session.pageIcon != null));
+            if (session.pageIcon != null && !OmniboxIcons.valid(page.favicon)) {
+                requestPageFavicon(session, activity, page, session.pageIcon);
+            }
 
             // Chrome can update OmniboxAlignment.paddingTop after the first
             // suggestion list has been shown (IME and bottom/top toolbar
@@ -370,14 +376,10 @@ final class CurrentPageCardFix {
         heading.setGravity(Gravity.CENTER_VERTICAL);
 
         ImageView favicon = new ImageView(activity);
-        if (page.favicon != null) {
-            OmniboxIcons.favicon(favicon, page.favicon);
-        } else {
-            favicon.setImageResource(android.R.drawable.ic_menu_view);
-            favicon.setImageTintList(ColorStateList.valueOf(secondary));
-        }
-        heading.addView(favicon, new LinearLayout.LayoutParams(
-                dp(activity, 24), dp(activity, 24)));
+        int edge = OmniboxIcons.pageIconSize(activity);
+        heading.addView(favicon, new LinearLayout.LayoutParams(edge, edge));
+        OmniboxIcons.pageDecoration(favicon, page.favicon, secondary);
+        session.pageIcon = favicon;
 
         LinearLayout texts = new LinearLayout(activity);
         texts.setOrientation(LinearLayout.VERTICAL);
@@ -478,19 +480,6 @@ final class CurrentPageCardFix {
                 0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
     }
 
-    private static ImageView firstImage(View view, int depth) {
-        if (view == null || depth > 7) return null;
-        if (view instanceof ImageView) return (ImageView) view;
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                ImageView found = firstImage(group.getChildAt(i), depth + 1);
-                if (found != null) return found;
-            }
-        }
-        return null;
-    }
-
     private static void requestPageFavicon(CardSession session, Activity activity,
             Page page, ImageView image) {
         // The callback can arrive after focus loss or navigation. Never put
@@ -499,25 +488,39 @@ final class CurrentPageCardFix {
             if (!OmniboxIcons.valid(bitmap) || SESSIONS.get(session.urlBar) != session
                     || session.card == null || !session.urlBar.hasFocus()
                     || !TextUtils.isEmpty(session.urlBar.getText())
-                    || !image.isAttachedToWindow() || firstImage(session.card, 0) != image
+                    || !image.isAttachedToWindow() || session.pageIcon != image
                     || findActiveTab(activity) != page.tab
                     || !page.url.equals(getTabUrl(page.tab, session.displayBeforeFocus))) return;
             OmniboxIcons.favicon(image, bitmap);
             XposedBridge.log("Current-page favicon: Chrome bitmap applied");
         });
-        ChromeUiDiscovery.requestFavicon(page.tab, activity.getClassLoader(), accept);
+        Object gurl = currentGurl(page.tab, page.url);
+        ChromeUiDiscovery.requestFavicon(page.tab, activity.getClassLoader(),
+                gurl, OmniboxIcons.pageIconSize(activity), accept);
         // A favicon can become available after the tab finishes loading even
         // if the Promise entry point was inlined. Use bounded retries only.
         for (long delay : new long[]{250L, 1000L, 2500L}) {
             session.urlBar.postDelayed(() -> {
                 if (SESSIONS.get(session.urlBar) != session || session.card == null
                         || !session.urlBar.hasFocus() || !image.isAttachedToWindow()
-                        || firstImage(session.card, 0) != image) return;
+                        || session.pageIcon != image) return;
                 Bitmap bitmap = ChromeUiDiscovery.currentFavicon(
                         page.tab, activity.getClassLoader());
                 if (OmniboxIcons.valid(bitmap)) accept.accept(bitmap);
             }, delay);
         }
+    }
+
+    private static Object currentGurl(Object tab, String verifiedUrl) {
+        for (Method method : tab.getClass().getMethods()) {
+            if (method.getParameterCount() != 0
+                    || !method.getReturnType().getName().equals("org.chromium.url.GURL")) continue;
+            try {
+                Object value = method.invoke(tab);
+                if (verifiedUrl.equals(getGurlSpec(value))) return value;
+            } catch (Throwable ignored) {}
+        }
+        return null;
     }
 
     private static Page findPage(Activity activity, String displayUrl) {
@@ -726,6 +729,7 @@ final class CurrentPageCardFix {
             XposedBridge.log("Current-page card cleanup failed", e);
         }
         session.card = null;
+        session.pageIcon = null;
         session.dropdown = null;
         session.suggestionContainer = null;
         session.cardHeight = 0;

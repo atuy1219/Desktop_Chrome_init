@@ -44,9 +44,18 @@ final class NativeOmniboxPageCard {
     private static final String CHROME = "com.android.chrome";
     private static final int EDIT_URL_SUGGESTION = 1; // Chromium 158 enum
 
-    static ViewGroup build(Activity activity, ViewGroup dropdown,
+    static final class RenderedCard {
+        final ViewGroup row;
+        final ImageView pageIcon;
+        RenderedCard(ViewGroup row, ImageView pageIcon) {
+            this.row = row;
+            this.pageIcon = pageIcon;
+        }
+    }
+
+    static RenderedCard build(Activity activity, ViewGroup dropdown,
             String title, String fullUrl, Bitmap favicon, TextView urlBar,
-            boolean incognito) {
+            boolean incognito, int rowWidth) {
         try {
             ViewGroup card = createChromeSuggestion(dropdown, EDIT_URL_SUGGESTION);
             if (card == null) {
@@ -121,20 +130,10 @@ final class NativeOmniboxPageCard {
                         + "measured native-layout overlay");
             }
 
-            // The native EditUrlSuggestionProcessor sets its decoration to
-            // the page favicon via fetchSuggestionFavicon(). Prefer the
-            // current tab favicon; use Chromium's globe drawable otherwise.
-            if (card.getChildCount() > 0 && card.getChildAt(0) instanceof ImageView) {
-                ImageView decoration = (ImageView) card.getChildAt(0);
-                if (favicon != null) {
-                    OmniboxIcons.favicon(decoration, favicon);
-                } else {
-                    int globe = id(activity, "ic_globe_24dp", "drawable");
-                    decoration.setImageResource(
-                            globe != 0 ? globe : android.R.drawable.ic_menu_view);
-                }
-                decoration.setVisibility(View.VISIBLE);
-            }
+            // Bind the actual decoration child explicitly, not an arbitrary
+            // ImageView selected later by a recursive traversal.
+            ImageView decoration = (ImageView) card.getChildAt(0);
+            OmniboxIcons.pageDecoration(decoration, favicon, first.getCurrentTextColor());
 
             // Chrome computes minHeight from resource provider while binding.
             // A native basic suggestion view with two lines is at least the
@@ -150,11 +149,75 @@ final class NativeOmniboxPageCard {
                 info("using original Chromium EDIT_URL_SUGGESTION "
                         + "BaseSuggestionView with external action overlay");
             }
-            return finalCard;
+            return ensureLeadingDecoration(activity, finalCard, card, decoration,
+                    first, favicon, incognito, rowWidth);
         } catch (Throwable error) {
             XposedBridge.log("Current-page card native rendering failed", error);
             return null;
         }
+    }
+
+    private static RenderedCard ensureLeadingDecoration(Activity activity,
+            ViewGroup rendered, ViewGroup nativeRow, ImageView decoration,
+            TextView title, Bitmap favicon, boolean incognito, int width) {
+        int edge = OmniboxIcons.pageIconSize(activity);
+        int area = Math.max(edge, dimension(activity, "omnibox_suggestion_icon_area_size", 56));
+        // The R8-optimized setSuggestionDimensions can be inlined, leaving the
+        // unbound SuggestionLayout's decoration area at zero. Check the real
+        // geometry, not merely ImageView.VISIBLE or its minimum dimensions.
+        rendered.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        rendered.layout(0, 0, width, rendered.getMeasuredHeight());
+        int iconLeft = relativeLeft(decoration, rendered);
+        int titleLeft = relativeLeft(title, rendered);
+        boolean rtl = rendered.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+        int leading = rtl ? width - iconLeft - decoration.getWidth() : iconLeft;
+        int titleStart = rtl ? width - titleLeft - title.getWidth() : titleLeft;
+        if (decoration.getWidth() >= edge && decoration.getHeight() >= edge
+                && leading >= 0 && titleStart >= leading + decoration.getWidth()
+                && titleStart >= area - dp(activity, 2)) {
+            info("favicon geometry native width=" + decoration.getWidth()
+                    + " titleStart=" + titleStart);
+            return new RenderedCard(rendered, decoration);
+        }
+
+        // Preserve the already-working share/copy/edit row. Only compensate
+        // its missing leading decoration with a fixed-size sibling, reserving
+        // the space in the row's layout instead of covering its title.
+        decoration.setVisibility(View.GONE);
+        FrameLayout wrapper = new FrameLayout(activity);
+        wrapper.setLayoutDirection(rendered.getLayoutDirection());
+        applyChromeCardSurface(wrapper, activity, null, incognito);
+        rendered.setBackground(null);
+        if (nativeRow != rendered) nativeRow.setBackground(null);
+        int leadIn = dimension(activity, "omnibox_simple_card_lead_in", 16);
+        FrameLayout.LayoutParams rowParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        rowParams.setMarginStart(Math.max(0, area - Math.max(0, leadIn)));
+        wrapper.addView(rendered, rowParams);
+        ImageView icon = new ImageView(activity);
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(
+                edge, edge, Gravity.TOP | Gravity.START);
+        iconParams.setMarginStart(Math.max(0, (area - edge) / 2));
+        iconParams.topMargin = Math.max(0, (Math.max(rendered.getMeasuredHeight(),
+                dimension(activity, "omnibox_suggestion_content_height", 56)) - edge) / 2);
+        wrapper.addView(icon, iconParams);
+        OmniboxIcons.pageDecoration(icon, favicon, title.getCurrentTextColor());
+        info("favicon geometry explicit lead-in nativeWidth=" + decoration.getWidth()
+                + " titleStart=" + titleStart + " area=" + area);
+        return new RenderedCard(wrapper, icon);
+    }
+
+    private static int relativeLeft(View child, View ancestor) {
+        int left = 0;
+        View current = child;
+        while (current != ancestor) {
+            left += current.getLeft();
+            if (!(current.getParent() instanceof View)) return Integer.MIN_VALUE / 4;
+            current = (View) current.getParent();
+        }
+        return left;
     }
 
     private static void applyChromeSuggestionColors(

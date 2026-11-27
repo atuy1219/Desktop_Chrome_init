@@ -151,6 +151,55 @@ final class OmniboxIcons {
                 && bitmap.getWidth() > 0 && bitmap.getHeight() > 0;
     }
 
+    static int pageIconSize(Context context) {
+        // OmniboxResourceProvider.getEdgeSize(SMALL) on mobile Chrome.
+        return Math.max(1, NativeOmniboxPageCard.dimension(
+                context, "omnibox_suggestion_24dp_icon_size", 24));
+    }
+
+    static void pageDecoration(ImageView view, Bitmap bitmap, int tint) {
+        int edge = pageIconSize(view.getContext());
+        android.view.ViewGroup.LayoutParams params = view.getLayoutParams();
+        if (params != null) {
+            params.width = edge;
+            params.height = edge;
+            view.setLayoutParams(params);
+        }
+        view.setPadding(0, 0, 0, 0);
+        view.setAdjustViewBounds(true);
+        view.setMaxWidth(edge);
+        view.setMaxHeight(edge);
+        view.setMinimumWidth(edge);
+        view.setMinimumHeight(edge);
+        view.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        view.setVisibility(View.VISIBLE);
+        view.setAlpha(1f);
+        view.setImageAlpha(255);
+        if (valid(bitmap)) {
+            favicon(view, bitmap);
+            return;
+        }
+        Drawable globe = installed(view.getContext(), "ic_globe_24dp");
+        if (globe != null) {
+            view.setImageDrawable(globe.mutate());
+        } else {
+            Bitmap generic = Bitmap.createBitmap(edge, edge, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(generic);
+            canvas.scale(edge / 24f, edge / 24f);
+            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            p.setColor(Color.WHITE);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(1.6f);
+            canvas.drawCircle(12, 12, 9, p);
+            canvas.drawOval(8, 3, 16, 21, p);
+            canvas.drawLine(3, 12, 21, 12, p);
+            view.setImageBitmap(generic);
+        }
+        view.setImageTintList(ColorStateList.valueOf(tint));
+        view.setClipToOutline(false);
+        view.requestLayout();
+    }
+
     static void favicon(ImageView view, Bitmap bitmap) {
         if (!valid(bitmap)) return;
         // Native OmniboxDrawableState.forFavIcon never applies text tint.
@@ -161,10 +210,17 @@ final class OmniboxIcons {
         view.setImageBitmap(bitmap);
         view.setScaleType(ImageView.ScaleType.FIT_CENTER);
         view.setVisibility(View.VISIBLE);
-        int size = Math.max(1, NativeOmniboxPageCard.dimension(
-                view.getContext(), "omnibox_suggestion_icon_small_size", 20));
+        int size = pageIconSize(view.getContext());
         view.setMinimumWidth(size);
         view.setMinimumHeight(size);
+        final int radius = NativeOmniboxPageCard.dimension(
+                view.getContext(), "omnibox_small_icon_rounding_radius", 2);
+        view.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override public void getOutline(View v, android.graphics.Outline outline) {
+                outline.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius);
+            }
+        });
+        view.setClipToOutline(true);
         view.requestLayout();
         view.invalidate();
     }

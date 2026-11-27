@@ -2,6 +2,12 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## 0.5.7-leading-favicon (test only)
+
+- Explicitly bind the page's decoration ImageView, mobile Chrome's 24dp icon size, no favicon tint and rounded outline. Measure actual native decoration/title geometry. If the unbound/inlined SuggestionLayout has no usable leading slot, insert a dedicated leading sibling and reserve the required width, preserving the existing share/copy/edit row.
+- A direct Chrome FaviconHelper local database request is resolved by the source name or a verified call site from TabFavicon's async method. Never select the identical foreign-favicon signature by guesswork. Uses the active tab's own profile and verified GURL only; no outside requests, no profile fallback. Retains TabFavicon retrieval and bounded retries when the local route is unavailable.
+- Uses explicit icon reference rather than a recursive first-ImageView heuristic. Logs geometry, availability and callback status without page contents. Device verification required.
+
 ## 0.5.6-omnibox-icons (test only)
 
 - All page-card renderers use the actual Chrome share/copy/edit drawables when available. No Android framework save/share/edit icon substitutions. Copy/edit fallback geometry is from Chromium 159's original BSD-licensed vector assets; share fallback uses Chromium's original LTR/RTL PNG artwork, vendored with Git blob verification during CI. Only an unprepared local build may use emergency geometry. For local builds run `python3 tools/vendor_chromium_share_icons.py` before Gradle. Icons use a common small-icon size and tint.
