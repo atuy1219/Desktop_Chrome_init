@@ -169,7 +169,7 @@ public final class ModernEntry extends XposedModule {
             }
         } catch (Throwable t) {
             d(phase + ": hook installation threw " + t);
-            log(Log.ERROR, TAG, phase + ": hook installation failed", t);
+            log(Log.ERROR, null, phase + ": hook installation failed", t);
             scheduleRetry(RETRY_INTERVAL_MS);
         }
     }
@@ -233,7 +233,7 @@ public final class ModernEntry extends XposedModule {
     private void d(String message) {
         Log.i(TAG, message);
         try {
-            log(Log.INFO, TAG, message);
+            log(Log.INFO, null, message);
         } catch (Throwable ignored) {
         }
     }
@@ -241,7 +241,7 @@ public final class ModernEntry extends XposedModule {
     private void e(String message) {
         Log.e(TAG, message);
         try {
-            log(Log.ERROR, TAG, message);
+            log(Log.ERROR, null, message);
         } catch (Throwable ignored) {
         }
     }

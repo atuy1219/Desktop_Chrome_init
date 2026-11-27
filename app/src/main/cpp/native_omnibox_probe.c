@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,7 +42,29 @@ typedef struct {
 static _Atomic(const NativeAPIEntries *) g_native_api = NULL;
 static atomic_bool g_logged_module = false;
 static atomic_bool g_logged_chromium = false;
-static unsigned int g_last_snapshot_matches = 0;
+typedef struct {
+    unsigned int matches;
+    size_t used;
+    char text[8192];
+} SnapshotReport;
+
+static void report_line(SnapshotReport *report, const char *format, ...) {
+    if (report->used >= sizeof(report->text) - 2) return;
+    size_t remaining = sizeof(report->text) - report->used;
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(report->text + report->used, remaining, format, args);
+    va_end(args);
+    if (n < 0) return;
+    if ((size_t)n >= remaining - 1) {
+        report->used = sizeof(report->text) - 1;
+        report->text[report->used] = '\0';
+        return;
+    }
+    report->used += (size_t)n;
+    report->text[report->used++] = '\n';
+    report->text[report->used] = '\0';
+}
 
 static bool is_chrome_process(void) {
     char name[128] = {0};
@@ -83,10 +106,8 @@ static bool segment_covers_note(struct dl_phdr_info *info,
 static int inspect_elf(struct dl_phdr_info *info,
                        size_t ignored, void *context) {
     (void)ignored;
-    const char *module = (const char *)context;
-    if (info->dlpi_name == NULL
-            || (module != NULL && strcmp(info->dlpi_name, module) != 0)
-            || !chromium_so_name(info->dlpi_name)) {
+    SnapshotReport *report = (SnapshotReport *)context;
+    if (info->dlpi_name == NULL || !chromium_so_name(info->dlpi_name)) {
         return 0;
     }
 
@@ -127,8 +148,8 @@ static int inspect_elf(struct dl_phdr_info *info,
         if (build_id[0]) break;
     }
 
-    ++g_last_snapshot_matches;
-    __android_log_print(ANDROID_LOG_INFO, TAG,
+    ++report->matches;
+    report_line(report,
             "mapped=%s base=0x%llx buildId=%s phdrCount=%u",
             info->dlpi_name, (unsigned long long)info->dlpi_addr,
             build_id[0] ? build_id : "NOT_FOUND",
@@ -186,29 +207,29 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     return JNI_VERSION_1_6;
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jstring JNICALL
 Java_com_atuy_chromemobilecompat_ChromeNativeProbe_nativeSnapshot(
         JNIEnv *env, jclass cls, jint phase) {
-    (void)env;
     (void)cls;
-    __android_log_print(ANDROID_LOG_INFO, TAG,
+    SnapshotReport report = {0};
+    const NativeAPIEntries *api = atomic_load(&g_native_api);
+    report_line(&report,
             "ELF snapshot START phase=%d pid=%ld nativeInitRegistered=%s"
-            " processIsChrome=%s",
-            phase, (long)getpid(),
-            g_native_api ? "true" : "false",
+            " nativeAPI=%u hookAvailable=%s linkerCallbackSeen=%s processIsChrome=%s",
+            phase, (long)getpid(), api ? "true" : "false",
+            api ? api->version : 0, api && api->hook_func ? "true" : "false",
+            atomic_load(&g_logged_chromium) ? "true" : "false",
             is_chrome_process() ? "true" : "false");
-    g_last_snapshot_matches = 0;
-    dl_iterate_phdr(inspect_elf, NULL);
+    dl_iterate_phdr(inspect_elf, &report);
     const char *targets[] = {
         "_ZN22AutocompleteClassifier23DefaultOmniboxProvidersEb",
         "_ZN32ZeroSuggestVerbatimMatchProvider5StartERK17AutocompleteInputb"
     };
     for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) {
         void *symbol = dlsym(RTLD_DEFAULT, targets[i]);
-        __android_log_print(ANDROID_LOG_INFO, TAG, "target=%s visible=%s",
+        report_line(&report, "target=%s visible=%s",
                 targets[i], symbol ? "yes" : "no");
     }
-    __android_log_print(ANDROID_LOG_INFO, TAG,
-            "ELF snapshot END phase=%d matches=%u",
-            phase, g_last_snapshot_matches);
+    report_line(&report, "ELF snapshot END phase=%d matches=%u", phase, report.matches);
+    return (*env)->NewStringUTF(env, report.text);
 }

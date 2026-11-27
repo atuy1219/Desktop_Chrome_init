@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.chromemobilecompat"
         minSdk = 29
         targetSdk = 35
-        versionCode = 38
-        versionName = "0.5.3-native-probe"
+        versionCode = 39
+        versionName = "0.5.4-native-probe"
         ndk { abiFilters += "arm64-v8a" }
     }
 

@@ -2,7 +2,9 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
-## 0.5.3-native-probe (test only)
+## 0.5.4-native-probe (test only)
+
+- Vector logging: all Java framework log calls use a null tag; native snapshot reports are returned to Java via JNI and emitted through the same libxposed logging bridge. Native early loader messages remain available in logcat.
 
 - Official Google Chrome APK remains unchanged; no source rebuild, no synthetic suggestion UI.
 - Integrates PR #21's read-only ELF diagnostic using libxposed 102's getModuleApplicationInfo() instead of PackageManager/classloader string heuristics. Explicit JNI load is independent of optional native_init callback support.
@@ -11,7 +13,7 @@ LSPosed compatibility module for using Desktop Chrome on Android phones with mob
 - Install the test build (disable old com.atuy.desktopchromeinit), enable and scope com.atuy.chromemobilecompat to com.android.chrome, force-stop Chrome and launch. After opening Omnibox, run:
 
 ```sh
-su -c 'logcat -d -v threadtime -b main | grep -E "ChromeNativeOmnibox|ChromeMobileCompat.*NATIVE_PROBE" | tail -n 120'
+su -c 'grep -rhF "com.atuy.chromemobilecompat:" /data/adb/lspd/log | tail -n 150'
 ```
 
 - Offline analysis: `python3 tools/inspect_chrome_native.py <apk> [more APKs...]`. Include the Trichrome library package if Chrome uses one. Do not merge until real-device verification.

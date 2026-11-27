@@ -3,7 +3,7 @@ package com.atuy.chromemobilecompat;
 import android.content.pm.ApplicationInfo;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
 
 import java.io.File;
 import java.util.LinkedHashSet;
@@ -12,8 +12,6 @@ import java.util.zip.ZipFile;
 
 /** Read-only native bootstrap. Native discovery never gates extension setup. */
 final class ChromeNativeProbe {
-    private static final String TAG = "ChromeNativeOmnibox";
-    private static final String BRIDGE = "ChromeMobileCompat";
     private static final String LIB = "libchrome_omnibox_probe.so";
     private static boolean loaded, scheduled;
     private static int attempts;
@@ -64,7 +62,12 @@ final class ChromeNativeProbe {
             final int index = i;
             main.postDelayed(() -> {
                 try {
-                    nativeSnapshot(index);
+                    String report = nativeSnapshot(index);
+                    if (report != null) {
+                        for (String line : report.split("\\n")) {
+                            if (!line.isEmpty()) marker(line);
+                        }
+                    }
                     marker("JNI snapshot OK index=" + index);
                 } catch (Throwable failure) {
                     marker("JNI snapshot failed: " + failure.getClass().getSimpleName()
@@ -83,10 +86,9 @@ final class ChromeNativeProbe {
     }
 
     private static void marker(String message) {
-        Log.i(BRIDGE, "NATIVE_PROBE " + message);
-        Log.i(TAG, message);
+        XposedBridge.log("NATIVE_PROBE " + message);
     }
 
-    private static native void nativeSnapshot(int phase);
+    private static native String nativeSnapshot(int phase);
     private ChromeNativeProbe() {}
 }

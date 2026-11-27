@@ -81,7 +81,7 @@ public final class XposedBridge {
     public static void log(String message) {
         XposedModule current = module;
         if (current != null) {
-            current.log(Log.INFO, TAG, message);
+            current.log(Log.INFO, null, message);
         } else {
             Log.i(TAG, message);
         }
