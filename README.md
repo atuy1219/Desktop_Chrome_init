@@ -4,6 +4,8 @@ LSPosed compatibility module for using Desktop Chrome on Android phones with mob
 
 ## 0.5.8-clipboard-text (test only)
 
+- Share PNGs are now committed as exact upstream blobs; CI verifies them offline to avoid GitHub HTTP 429 failures.
+
 - Fallback page icon uses the exact Chromium 159 filled continent globe vector from ui/android/java/res/drawable/ic_globe_24dp.xml rather than a generic longitude/latitude globe. Real favicon remains first choice.
 - Clipboard fallback now supports copied text and HTTP(S) links; follows Chromium ClipboardSuggestionProcessor's search/globe decoration and reveal/conceal eye assets. The stable fixed-height fallback row inherits native suggestion text metrics/colors and stays hidden by default. Tap refines the Omnibox; user submits manually. It is not a native autocomplete provider.
 - Fresh single-item text only, no sensitive-flagged items, no unknown/OTR profile, no startup clipboard reads, no persistence or logging of contents; revalidate clip timestamp before reveal/refine. Native candidate takes precedence. Currently attached to the current-page fallback flow.
@@ -17,7 +19,7 @@ LSPosed compatibility module for using Desktop Chrome on Android phones with mob
 
 ## 0.5.6-omnibox-icons (test only)
 
-- All page-card renderers use the actual Chrome share/copy/edit drawables when available. No Android framework save/share/edit icon substitutions. Copy/edit fallback geometry is from Chromium 159's original BSD-licensed vector assets; share fallback uses Chromium's original LTR/RTL PNG artwork, vendored with Git blob verification during CI. Only an unprepared local build may use emergency geometry. For local builds run `python3 tools/vendor_chromium_share_icons.py` before Gradle. Icons use a common small-icon size and tint.
+- All page-card renderers use the actual Chrome share/copy/edit drawables when available. No Android framework save/share/edit icon substitutions. Copy/edit fallback geometry is from Chromium 159's original BSD-licensed vector assets; share fallback uses Chromium's original LTR/RTL PNG artwork, committed to the repository and verified against upstream Git blob IDs offline during CI. No download is needed. Icons use a common small-icon size and tint.
 - TabFavicon discovery uses matching JNI signatures, not obfuscated Tab names. Re-resolves cached failures, prefers the live Tab class loader, distinguishes from(Tab) from get(Tab) by its object-construction instruction, creates a native TabFavicon user-data object if needed, requests Chrome's own local favicon DB via Promise, and uses bounded retries. Only the current card receives a valid bitmap and its tint is cleared. No external favicon service or network request is introduced.
 - Source references: Chromium EditUrlSuggestionProcessor, OmniboxDrawableState, TabFavicon, components/embedder_support/android/java/res/drawable/ic_content_copy.xml and components/browser_ui/styles/android/java/res/drawable/ic_edit_24dp.xml (Chromium BSD license).
 - Device verification required.

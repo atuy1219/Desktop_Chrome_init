@@ -38,7 +38,7 @@ jobs:
       - name: Validate native ELF inventory
         run: python3 -m py_compile tools/inspect_chrome_native.py
 
-      - name: Vendor and verify Chromium share icons
+      - name: Verify committed Chromium share icons
         run: python3 tools/vendor_chromium_share_icons.py
 
       - name: Build signed release APK

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Vendor the exact upstream Chromium share PNGs for the APK (not runtime)."""
+"""Verify the committed upstream Chromium share PNGs offline."""
 import hashlib
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 # Verified blob IDs from the Chromium source tree. No Chrome runtime version
 # checks: these are stable fallback artwork, not binary hook offsets.
-ROOT = ("https://raw.githubusercontent.com/chromium/chromium/159.0.8154.18/"
-        "components/browser_ui/styles/android/java/res/")
 ICONS = {
     "chromium_share_ltr.png": (
         "drawable-xxxhdpi/ic_share_white_24dp.png",
@@ -26,12 +23,8 @@ def main():
     for name, (path, expected) in ICONS.items():
         dest = OUT / name
         data = dest.read_bytes() if dest.exists() else b""
-        if git_sha(data) != expected:
-            with urlopen(Request(ROOT + path, headers={"User-Agent": "ChromeMobileCompat-CI"}), timeout=45) as response:
-                data = response.read(1024 * 1024)
         if not data.startswith(b"\x89PNG\r\n\x1a\n") or git_sha(data) != expected:
             raise RuntimeError(f"Unexpected Chromium asset: {name}")
-        dest.write_bytes(data)
         print(f"Verified Chromium asset: {name} {expected}")
 
 if __name__ == "__main__":
