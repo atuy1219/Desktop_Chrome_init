@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.content.pm.ApplicationInfo;
 

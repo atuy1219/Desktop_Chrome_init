@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DesktopChromeInit"
+rootProject.name = "ChromeMobileCompat"
 include(":app")

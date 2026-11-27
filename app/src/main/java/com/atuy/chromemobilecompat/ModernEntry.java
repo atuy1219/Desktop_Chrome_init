@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.app.Application;
 import android.content.pm.ApplicationInfo;
@@ -6,8 +6,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import com.atuy.desktopchromeinit.compat.XposedBridge;
-import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
+import com.atuy.chromemobilecompat.compat.callbacks.XC_LoadPackage;
 
 import java.lang.reflect.Method;
 
@@ -24,7 +24,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
  * class name is used as a readiness probe.
  */
 public final class ModernEntry extends XposedModule {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static final String TARGET_PACKAGE = "com.android.chrome";
     private static final long RETRY_INTERVAL_MS = 250L;
     private static final int MAX_RETRY_COUNT = 240;

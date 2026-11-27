@@ -1,11 +1,12 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.util.Log;
 
-import com.atuy.desktopchromeinit.compat.XC_MethodHook;
-import com.atuy.desktopchromeinit.compat.XposedBridge;
+import com.atuy.chromemobilecompat.compat.XC_MethodHook;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
 
 import java.lang.reflect.Method;
 
@@ -17,7 +18,7 @@ import java.lang.reflect.Method;
  * unrelated Chrome features and can trigger additional desktop-only paths.
  */
 final class ChromeInputCompatibility {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static final String TARGET = "com.android.chrome";
     private static final String PC_FEATURE = "android.hardware.type.pc";
     private static volatile boolean desktopExperienceHooked;
@@ -39,17 +40,20 @@ final class ChromeInputCompatibility {
                         if (param.args == null || param.args.length != 1
                                 || !(param.args[0] instanceof Context)) return;
                         Context context = (Context) param.args[0];
-                        if (!shouldApplyFix(context)) return;
-                        // Retain the current URL when tapping the Omnibox. This
-                        // affects only Omnibox desktop-experience checks, not
-                        // Chrome's OS-wide DeviceInfo.isDesktop() result.
-                        param.setResult(true);
+                        if (!shouldUseMobileOmnibox(context)) return;
+                        // Chrome 158's EditUrlSuggestionProcessor rejects the
+                        // mobile current-page card when this is true. Restore
+                        // the phone focus/edit flow and native card, including
+                        // favicon, URL color and share/copy/edit actions.
+                        // Do not override DeviceInfo.isDesktop() or native
+                        // platform detection: desktop extensions must remain.
+                        param.setResult(false);
                     }
                 });
                 desktopExperienceHooked = true;
-                log("Omnibox desktop-experience compatibility hook installed");
+                log("Omnibox mobile-experience hook installed");
             } catch (Throwable t) {
-                log("Omnibox desktop-experience hook unavailable: " + t);
+                log("Omnibox mobile-experience hook unavailable: " + t);
             }
         }
 
@@ -77,6 +81,15 @@ final class ChromeInputCompatibility {
                 log("Omnibox IME debounce hook unavailable: " + t);
             }
         }
+    }
+
+    private static boolean shouldUseMobileOmnibox(Context context) {
+        if (!shouldApplyFix(context)) return false;
+        // Leave genuine tablet/desktop configurations to Chromium. On a phone,
+        // the mobile edit card is intentional even with Desktop Chrome installed.
+        Configuration config = context.getResources().getConfiguration();
+        int smallestWidth = config.smallestScreenWidthDp;
+        return smallestWidth > 0 && smallestWidth < 600;
     }
 
     private static boolean shouldApplyFix(Context context) {

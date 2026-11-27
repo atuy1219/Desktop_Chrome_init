@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit.compat;
+package com.atuy.chromemobilecompat.compat;
 
 import android.util.Log;
 
@@ -15,7 +15,7 @@ import io.github.libxposed.api.XposedModule;
  * No de.robv.android.xposed classes are referenced or packaged.
  */
 public final class XposedBridge {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static volatile XposedModule module;
 
     private XposedBridge() {}

@@ -61,11 +61,11 @@ jobs:
 
           "$APKSIGNER" verify --verbose --print-certs "$APK"
 
-          cp "$APK" app/build/outputs/DesktopChromeInit-release.apk
-          ls -lh app/build/outputs/DesktopChromeInit-release.apk
+          cp "$APK" app/build/outputs/ChromeMobileCompat-release.apk
+          ls -lh app/build/outputs/ChromeMobileCompat-release.apk
 
       - uses: actions/upload-artifact@v7
         with:
-          name: DesktopChromeInit-release
-          path: app/build/outputs/DesktopChromeInit-release.apk
+          name: ChromeMobileCompat-release
+          path: app/build/outputs/ChromeMobileCompat-release.apk
           if-no-files-found: error

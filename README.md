@@ -1,6 +1,14 @@
-# Desktop Chrome Init
+# Chrome Mobile Compatibility
 
-LSPosed module for Google Chrome Desktop Android builds running on unsupported Android phone layouts.
+LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
+
+## 0.5.0: mobile Omnibox and module identity
+
+- New application ID: `com.atuy.chromemobilecompat`. Disable/uninstall the old `com.atuy.desktopchromeinit` module, install this module, enable it and scope it to `com.android.chrome`. Do not run both modules together.
+- On phone configurations (smallest width below 600 dp, no PC system feature, Desktop Chrome Extensions resource present), the Omnibox uses the mobile experience. Chrome 158's `EditUrlSuggestionProcessor` can then select the original current-page card with favicon, URL styling and share/copy/edit actions. All original eligibility checks remain intact. Chrome's global desktop identity and extensions hooks are unchanged.
+- The existing IME debounce workaround remains separate. Tapping the Omnibox can clear its input as in mobile Chrome; use the current-page edit action to edit the current URL.
+- Clipboard suggestions are still unresolved: Chrome 158 excludes the native clipboard provider in `AutocompleteClassifier::DefaultOmniboxProviders` for Desktop Android. Changing Java presentation cannot restore this provider; exact APK/native analysis is required. No synthetic clipboard entries or polling are introduced.
+- Source-validated against Chromium 158.0.8127.42; device verification is required. No shortcut changes.
 
 ## Compatibility model
 
@@ -52,7 +60,7 @@ remove a still-active temporary action.
 Diagnostics (after restarting Chrome and reproducing the issue):
 
 ```sh
-su -c 'logcat -d -v threadtime -b main | grep -E "DesktopChromeInit.*(PopupWindow.dismiss|popup dismiss cleanup|popup bridge)" | tail -n 100'
+su -c 'logcat -d -v threadtime -b main | grep -E "ChromeMobileCompat.*(PopupWindow.dismiss|popup dismiss cleanup|popup bridge)" | tail -n 100'
 ```
 
 Expected: `installed PopupWindow.dismiss temporary popout cleanup` at
@@ -73,7 +81,7 @@ and `(String, reference, boolean)` shape. The second parameter's actual
 R8-renamed reference type is discovered at runtime. It logs installation
 and each invoked action, allowing a direct check of the device behavior.
 
-Use `su -c 'logcat -d -v threadtime -b main -s DesktopChromeInit:V'`
+Use `su -c 'logcat -d -v threadtime -b main -s ChromeMobileCompat:V'`
 after force-stopping and relaunching Chrome. If recent logs have rotated,
 start continuous capture before reproducing the issue. This is a source-
 validated fix; live Chrome 158 testing is still required.
@@ -94,9 +102,7 @@ APK build alone does not prove the Extensions popup is working.
 On unsupported phone devices that install the Desktop Android Chrome APK, the
 module additionally attempts two isolated Omnibox hooks:
 
-- `OmniboxCapabilities.hasDesktopExperience(Context)`: retain the current URL
-  when the address bar gains focus, without spoofing `DeviceInfo.isDesktop()`
-  for the entire Chrome process.
+- `OmniboxCapabilities.hasDesktopExperience(Context)`: historical 0.4.12 workaround retained the URL. Superseded by the 0.5.0 mobile-experience hook above; the global desktop identity remains untouched.
 - `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled()`: disable the
   internal 150 ms IME visibility debounce and use immediate show/hide requests
   instead. This is an experimental workaround for stale keyboard state; it
@@ -112,7 +118,7 @@ hooks fail safely and log that they were not installed.
 After reproducing a click that appears to do nothing:
 
 ```sh
-su -c 'logcat -d -v threadtime | grep -Ei "DesktopChromeInit|InputMethodManager|ImeTracker|BackNavigation" | tail -n 200'
+su -c 'logcat -d -v threadtime | grep -Ei "ChromeMobileCompat|InputMethodManager|ImeTracker|BackNavigation" | tail -n 200'
 ```
 
 The key messages are `DEX symbols resolved`, `Extensions menu click`,
@@ -146,7 +152,7 @@ If a future Chrome version changes the architecture enough that the structural r
 Logs are prefixed with:
 
 ```text
-DesktopChromeInit:
+ChromeMobileCompat:
 ```
 
 On a successfully resolved build, startup includes a line similar to:
@@ -161,14 +167,14 @@ DEX symbols resolved: ToolbarManager=... supplier=... coordinator=... menu=...
 gradle :app:assembleRelease
 ```
 
-GitHub Actions builds and verifies a signed release APK and uploads it as the `DesktopChromeInit-release` artifact.
+GitHub Actions builds and verifies a signed release APK and uploads it as the `ChromeMobileCompat-release` artifact.
 
 ## Install
 
-1. Install the module APK.
+1. Disable/uninstall the previous Desktop Chrome Init module, if installed, then install the new module APK.
 2. Enable it in LSPosed.
 3. Scope it to Chrome (`com.android.chrome`).
 4. Force-stop Chrome after installing/updating the module.
 5. Launch Chrome.
-6. Check the LSPosed log for `DesktopChromeInit: DEX symbols resolved`.
+6. Check the LSPosed log for `ChromeMobileCompat: DEX symbols resolved`.
 7. Open the Extensions menu and test pinned/unpinned extension popups.

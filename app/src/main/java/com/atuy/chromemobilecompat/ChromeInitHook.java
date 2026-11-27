@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.app.Activity;
 import android.app.Application;
@@ -18,11 +18,11 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import com.atuy.desktopchromeinit.compat.IXposedHookLoadPackage;
-import com.atuy.desktopchromeinit.compat.XC_MethodHook;
-import com.atuy.desktopchromeinit.compat.XposedBridge;
-import com.atuy.desktopchromeinit.compat.XposedHelpers;
-import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
+import com.atuy.chromemobilecompat.compat.IXposedHookLoadPackage;
+import com.atuy.chromemobilecompat.compat.XC_MethodHook;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
+import com.atuy.chromemobilecompat.compat.XposedHelpers;
+import com.atuy.chromemobilecompat.compat.callbacks.XC_LoadPackage;
 
 /**
  * Version-independent repair for Google Chrome Desktop Android builds running
@@ -33,7 +33,7 @@ import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
  * synthetic-class names.
  */
 public final class ChromeInitHook implements IXposedHookLoadPackage {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static final String TARGET_PACKAGE = "com.android.chrome";
 
     private static volatile ClassLoader chromeClassLoader;
@@ -3345,7 +3345,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             activity.runOnUiThread(() ->
                     android.widget.Toast.makeText(
                             activity,
-                            "DesktopChromeInit: " + detail,
+                            "ChromeMobileCompat: " + detail,
                             android.widget.Toast.LENGTH_LONG)
                             .show());
         } catch (Throwable ignored) {

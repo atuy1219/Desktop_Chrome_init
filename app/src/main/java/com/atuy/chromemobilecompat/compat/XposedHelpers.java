@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit.compat;
+package com.atuy.chromemobilecompat.compat;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -10,7 +10,7 @@ import java.util.List;
 import io.github.libxposed.api.XposedInterface;
 
 /**
- * Reflection helpers used by DesktopChromeInit.
+ * Reflection helpers used by ChromeMobileCompat.
  *
  * This intentionally implements only the operations used by this module. It is
  * not a copy of, or dependency on, the legacy XposedHelpers implementation.
