@@ -5,11 +5,10 @@ import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.res.ColorStateList;
-import android.graphics.Rect;
 import android.net.Uri;
+import android.os.PersistableBundle;
 import android.text.TextUtils;
-import com.atuy.chromemobilecompat.compat.XposedBridge;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -18,257 +17,236 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Only adds the missing mobile-style clipboard suggestion when Chrome's own
- * CLIPBOARD_SUGGESTION (type 5) is not in its autocomplete adapter.
- *
- * Uses Chromium's actual OmniboxViewHolderFactory, UI resource IDs,
- * Source-verified icon sizes and 3-minute Android clipboard age limit.
- * No clipboard reads happen on startup. No clipboard data are logged.
- */
+/** Missing mobile clipboard candidate only; no logging or persistent clipboard storage. */
 final class NativeClipboardSuggestion {
-    private static final String TAG = "ChromeMobileCompat";
-    private static final String CHROME = "com.android.chrome";
     private static final int CLIPBOARD_SUGGESTION = 5;
-    private static final long DEFAULT_MAX_AGE_MS = 3 * 60 * 1000L;
+    private static final long MAX_AGE_MS = 180_000L;
+    private static final int MAX_TEXT_LENGTH = 32_768;
 
-    static ViewGroup maybeBuild(Activity activity, ViewGroup dropdown,
-            TextView urlBar, Boolean offTheRecord) {
-        // Never surface a system clipboard item into an OTR window. Do not
-        // display it if we cannot positively identify a regular profile.
-        if (!Boolean.FALSE.equals(offTheRecord)) {
-            XposedBridge.log("Clipboard card: skipped (incognito/unknown profile)");
-            return null;
+    private static final class Item {
+        final long timestamp;
+        final String text;
+        final boolean url;
+        Item(long timestamp, String text, boolean url) {
+            this.timestamp = timestamp; this.text = text; this.url = url;
         }
-        if (nativeClipboardPresent(dropdown)) {
-            XposedBridge.log("Clipboard card: native candidate already provided; skipped");
-            return null;
-        }
+    }
 
-        ClipboardManager manager = (ClipboardManager)
-                activity.getSystemService(Context.CLIPBOARD_SERVICE);
-        if (manager == null || !manager.hasPrimaryClip()) return null;
-
-        final String clipboardUrl;
+    private static Item read(ClipboardManager manager) {
         try {
             ClipDescription description = manager.getPrimaryClipDescription();
             if (description == null) return null;
-            long timestamp = description.getTimestamp();
-            long age = System.currentTimeMillis() - timestamp;
-            // Chromium ClipboardRecentContent defaults to 3 minutes on
-            // Android. A zero/untrusted timestamp is not treated as fresh.
-            if (timestamp <= 0 || age < 0 || age > DEFAULT_MAX_AGE_MS) {
+            long stamp = description.getTimestamp();
+            long age = System.currentTimeMillis() - stamp;
+            if (stamp <= 0 || age < 0 || age > MAX_AGE_MS) return null;
+            PersistableBundle extras = description.getExtras();
+            if (extras != null && extras.getBoolean("android.content.extra.IS_SENSITIVE", false))
                 return null;
-            }
-            boolean textOrUri = description.hasMimeType(
-                    ClipDescription.MIMETYPE_TEXT_PLAIN)
-                    || description.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)
-                    || description.hasMimeType(ClipDescription.MIMETYPE_TEXT_URILIST);
-            if (!textOrUri) return null;
-            // Clipboard is read only after user explicitly focuses Omnibox;
-            // this may trigger Android's standard clipboard-access notice.
-            ClipData clip = manager.getPrimaryClip();
-            if (clip == null || clip.getItemCount() != 1) return null;
-            ClipData.Item item = clip.getItemAt(0);
-            CharSequence value = item.getText();
-            String text = value != null ? value.toString() : null;
-            if (TextUtils.isEmpty(text) && item.getUri() != null) {
-                text = item.getUri().toString();
-            }
-            if (TextUtils.isEmpty(text)) return null;
-            text = text.trim();
-            Uri uri = Uri.parse(text);
-            String scheme = uri.getScheme(), host = uri.getHost();
-            if (host == null || (!"http".equalsIgnoreCase(scheme)
-                    && !"https".equalsIgnoreCase(scheme))) return null;
-            clipboardUrl = text;
+            boolean plain = description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)
+                    || description.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML);
+            boolean uriList = description.hasMimeType(ClipDescription.MIMETYPE_TEXT_URILIST);
+            if (!plain && !uriList) return null;
+            ClipData data = manager.getPrimaryClip();
+            if (data == null || data.getItemCount() != 1
+                    || data.getDescription().getTimestamp() != stamp) return null;
+            ClipData.Item item = data.getItemAt(0);
+            CharSequence raw = item.getText();
+            boolean uriOnly = raw == null;
+            String text = raw != null ? raw.toString()
+                    : item.getUri() != null ? item.getUri().toString() : null;
+            if (text == null || text.length() > MAX_TEXT_LENGTH || text.trim().isEmpty()) return null;
+            String trimmed = text.trim();
+            Uri uri = Uri.parse(trimmed);
+            boolean url = !trimmed.matches("(?s).*\\s.*")
+                    && uri.getHost() != null && ("http".equalsIgnoreCase(uri.getScheme())
+                    || "https".equalsIgnoreCase(uri.getScheme()));
+            if (uriOnly && !url) return null;
+            return new Item(stamp, url ? trimmed : text, url);
         } catch (Throwable e) {
-            XposedBridge.log("Clipboard card: Android clipboard unavailable ("
-                    + e.getClass().getSimpleName() + ")");
-            return null;
-        }
-
-        try {
-            ViewGroup card = NativeOmniboxPageCard.createChromeSuggestion(
-                    dropdown, CLIPBOARD_SUGGESTION);
-            if (card == null) return null;
-            TextView line1 = getLine(card, activity, "line_1", 0);
-            TextView line2 = getLine(card, activity, "line_2", 1);
-            if (line1 == null || line2 == null) return null;
-
-            boolean ja = "ja".equals(activity.getResources()
-                    .getConfiguration().getLocales().get(0).getLanguage());
-            line1.setText(ja ? "コピーしたリンク" : "Copied link");
-            line1.setVisibility(View.VISIBLE);
-            line2.setText("");
-            line2.setVisibility(View.GONE);
-
-            ViewGroup nativeReference = findNativeReference(dropdown, card.getClass());
-            if (nativeReference != null) {
-                TextView ref1 = getLine(nativeReference, activity, "line_1", 0);
-                TextView ref2 = getLine(nativeReference, activity, "line_2", 1);
-                if (ref1 != null) line1.setTextColor(ref1.getCurrentTextColor());
-                if (ref2 != null) line2.setTextColor(ref2.getCurrentTextColor());
-            }
-
-            NativeOmniboxPageCard.configureOriginalSuggestionDimensions(card, activity);
-            card.setMinimumHeight(NativeOmniboxPageCard.dimension(
-                    activity, "omnibox_suggestion_content_height", 56));
-            ImageView decoration = (ImageView) card.getChildAt(0);
-            int globe = id(activity, "ic_globe_24dp", "drawable");
-            decoration.setImageResource(globe != 0 ? globe
-                    : android.R.drawable.ic_menu_view);
-            decoration.setImageTintList(
-                    ColorStateList.valueOf(line1.getCurrentTextColor()));
-            decoration.setVisibility(View.VISIBLE);
-
-            FrameLayout wrapper = new FrameLayout(activity);
-            wrapper.setMinimumHeight(NativeOmniboxPageCard.dimension(
-                    activity, "omnibox_suggestion_content_height", 56));
-            NativeOmniboxPageCard.applyChromeCardSurface(
-                    wrapper, activity, nativeReference, false);
-            int actionWidth = NativeOmniboxPageCard.dimension(
-                    activity, "omnibox_suggestion_action_button_width", 48);
-            card.setPaddingRelative(card.getPaddingStart(), card.getPaddingTop(),
-                    card.getPaddingEnd() + actionWidth, card.getPaddingBottom());
-            wrapper.addView(card, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL));
-
-            ImageView eye = new ImageView(activity);
-            eye.setClickable(true);
-            eye.setFocusable(true);
-            eye.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-            int inset = Math.max(0, (actionWidth - dp(activity, 20)) / 2);
-            eye.setPadding(inset, inset, inset, inset);
-            int eyeIcon = id(activity, "ic_visibility_black", "drawable");
-            int concealedIcon = id(activity, "ic_visibility_off_black", "drawable");
-            eye.setImageResource(eyeIcon != 0
-                    ? eyeIcon : android.R.drawable.ic_menu_view);
-            eye.setImageTintList(ColorStateList.valueOf(line1.getCurrentTextColor()));
-            eye.setContentDescription(ja ? "リンクを表示" : "Reveal copied link");
-            eye.setOnClickListener(v -> {
-                boolean reveal = line2.getVisibility() != View.VISIBLE;
-                line2.setText(reveal ? clipboardUrl : "");
-                line2.setVisibility(reveal ? View.VISIBLE : View.GONE);
-                if (concealedIcon != 0 && eyeIcon != 0) {
-                    eye.setImageResource(reveal ? concealedIcon : eyeIcon);
-                }
-                eye.setContentDescription(ja
-                        ? (reveal ? "リンクを非表示" : "リンクを表示")
-                        : (reveal ? "Hide copied link" : "Reveal copied link"));
-            });
-            FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
-                    actionWidth, ViewGroup.LayoutParams.MATCH_PARENT,
-                    Gravity.END | Gravity.CENTER_VERTICAL);
-            wrapper.addView(eye, actionParams);
-
-            // Tapping the row refines the Omnibox to the copied URL; the user
-            // must explicitly submit to navigate. No URL is logged/stored.
-            card.setOnClickListener(v -> {
-                if (urlBar instanceof EditText) {
-                    EditText edit = (EditText) urlBar;
-                    edit.setText(clipboardUrl);
-                    edit.setSelection(edit.length());
-                }
-            });
-            XposedBridge.log("Clipboard card: shown using original Chrome view type 5"
-                    + " (URL contents redacted)");
-            return wrapper;
-        } catch (Throwable e) {
-            XposedBridge.log("Clipboard card: native view creation unavailable ("
-                    + e.getClass().getSimpleName() + ")");
+            XposedBridge.log("Clipboard card: read unavailable (" + e.getClass().getSimpleName() + ")");
             return null;
         }
     }
 
-    private static boolean nativeClipboardPresent(ViewGroup dropdown) {
+    static ViewGroup maybeBuild(Activity activity, ViewGroup dropdown,
+            TextView urlBar, Boolean offTheRecord) {
+        if (!Boolean.FALSE.equals(offTheRecord) || !urlBar.hasFocus()
+                || !activity.hasWindowFocus()) {
+            XposedBridge.log("Clipboard card: skipped (profile/focus not verified)");
+            return null;
+        }
+        if (nativeClipboardPresent(dropdown)) return null;
+        ClipboardManager manager = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (manager == null) return null;
+        Item initial = read(manager);
+        if (initial == null) return null;
+        // Retain only timestamp/type while hidden. Re-read the same clip upon
+        // an explicit reveal/refine action, rejecting replacements/expiry.
+        final long stamp = initial.timestamp;
+        final boolean url = initial.url;
+        final boolean ja = "ja".equals(activity.getResources().getConfiguration()
+                .getLocales().get(0).getLanguage());
+        int height = Math.max(dp(activity, 56), NativeOmniboxPageCard.dimension(
+                activity, "omnibox_suggestion_content_height", 56));
+        int lead = Math.max(OmniboxIcons.pageIconSize(activity), NativeOmniboxPageCard.dimension(
+                activity, "omnibox_suggestion_icon_area_size", 56));
+        int actionWidth = NativeOmniboxPageCard.dimension(activity,
+                "omnibox_suggestion_action_button_width", 48);
+        if (actionWidth < dp(activity, 32) || actionWidth > dp(activity, 80))
+            actionWidth = dp(activity, 48);
+
+        // Reuse the native row's text metrics and colors, but use a fixed-height
+        // role layout here: an unbound clipboard ViewHolder can have zero lead
+        // width or be removed by R8, just like the current-page decoration.
+        List<TextView> reference = new ArrayList<>();
+        ViewGroup nativeReference = null;
+        for (int i = 0; i < dropdown.getChildCount(); i++) {
+            View child = dropdown.getChildAt(i);
+            if (!(child instanceof ViewGroup)) continue;
+            collectTexts(child, reference, 0);
+            if (!reference.isEmpty()) { nativeReference = (ViewGroup) child; break; }
+        }
+        int primary = reference.isEmpty() ? urlBar.getCurrentTextColor()
+                : reference.get(0).getCurrentTextColor();
+        int secondary = reference.size() > 1 ? reference.get(1).getCurrentTextColor() : primary;
+
+        FrameLayout row = new FrameLayout(activity);
+        row.setLayoutDirection(dropdown.getLayoutDirection());
+        NativeOmniboxPageCard.applyChromeCardSurface(row, activity, nativeReference, false);
+        row.setMinimumHeight(height);
+        LinearLayout content = new LinearLayout(activity);
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        content.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(content, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height));
+
+        FrameLayout leading = new FrameLayout(activity);
+        content.addView(leading, new LinearLayout.LayoutParams(lead, height));
+        int edge = OmniboxIcons.pageIconSize(activity);
+        ImageView decoration = new ImageView(activity);
+        leading.addView(decoration, new FrameLayout.LayoutParams(edge, edge, Gravity.CENTER));
+        OmniboxIcons.suggestionGlyph(decoration, url ? "ic_globe_24dp" : "ic_search_24dp", primary);
+
+        LinearLayout lines = new LinearLayout(activity);
+        lines.setOrientation(LinearLayout.VERTICAL);
+        lines.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(lines, new LinearLayout.LayoutParams(0, height, 1f));
+        TextView title = textLine(activity, reference.isEmpty() ? null : reference.get(0), primary, 16);
+        title.setText(ja ? (url ? "コピーしたリンク" : "コピーしたテキスト")
+                : (url ? "Copied link" : "Copied text"));
+        lines.addView(title);
+        TextView detail = textLine(activity, reference.size() > 1 ? reference.get(1) : null, secondary, 14);
+        detail.setVisibility(View.GONE);
+        lines.addView(detail);
+
+        ImageView eye = new ImageView(activity);
+        eye.setClickable(true);
+        eye.setFocusable(true);
+        eye.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        int insetX = Math.max(0, (actionWidth - edge) / 2);
+        int insetY = Math.max(0, (height - edge) / 2);
+        eye.setPadding(insetX, insetY, insetX, insetY);
+        content.addView(eye, new LinearLayout.LayoutParams(actionWidth, height));
+        int foreground = activity.getResources().getIdentifier(
+                "action_button_foreground_selector", "drawable", "com.android.chrome");
+        if (foreground != 0) eye.setForeground(activity.getDrawable(foreground));
+        OmniboxIcons.suggestionGlyph(eye, "ic_visibility_black", primary);
+        eye.setContentDescription(ja ? "クリップボードの内容を表示" : "Reveal clipboard contents");
+        eye.setOnClickListener(v -> {
+            if (detail.getVisibility() == View.VISIBLE) {
+                detail.setText("");
+                detail.setVisibility(View.GONE);
+                OmniboxIcons.suggestionGlyph(eye, "ic_visibility_black", primary);
+                eye.setContentDescription(ja ? "クリップボードの内容を表示" : "Reveal clipboard contents");
+                return;
+            }
+            Item current = read(manager);
+            if (current == null || current.timestamp != stamp || current.url != url
+                    || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
+            detail.setText(current.text);
+            detail.setVisibility(View.VISIBLE);
+            OmniboxIcons.suggestionGlyph(eye, "ic_visibility_off_black", primary);
+            eye.setContentDescription(ja ? "クリップボードの内容を非表示" : "Conceal clipboard contents");
+        });
+        row.setClickable(true);
+        row.setOnClickListener(v -> {
+            if (!(urlBar instanceof EditText) || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
+            Item current = read(manager);
+            if (current == null || current.timestamp != stamp || current.url != url) return;
+            EditText edit = (EditText) urlBar;
+            edit.setText(current.text);
+            edit.setSelection(edit.length());
+        });
+        // Expire revealed text and hide the entire stale row without retaining
+        // clipboard content in module fields or preferences.
+        row.postDelayed(() -> {
+            detail.setText("");
+            detail.setVisibility(View.GONE);
+            row.setVisibility(View.INVISIBLE);
+        }, Math.max(1L, MAX_AGE_MS - (System.currentTimeMillis() - stamp)));
+        row.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View v) {}
+            @Override public void onViewDetachedFromWindow(View v) { detail.setText(""); }
+        });
+        XposedBridge.log("Clipboard card: shown kind=" + (url ? "URL" : "TEXT") + " (content redacted)");
+        return row;
+    }
+
+    private static TextView textLine(Activity activity, TextView reference, int color, int sp) {
+        TextView text = new TextView(activity);
+        text.setSingleLine(true);
+        text.setEllipsize(TextUtils.TruncateAt.END);
+        text.setTextColor(color);
+        if (reference != null) {
+            text.setTextSize(TypedValue.COMPLEX_UNIT_PX, reference.getTextSize());
+            text.setTypeface(reference.getTypeface());
+            text.setIncludeFontPadding(reference.getIncludeFontPadding());
+        } else text.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        text.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return text;
+    }
+
+    static boolean nativeClipboardPresent(ViewGroup dropdown) {
         try {
-            Method getAdapter = dropdown.getClass().getMethod("getAdapter");
-            Object adapter = getAdapter.invoke(dropdown);
+            Object adapter = dropdown.getClass().getMethod("getAdapter").invoke(dropdown);
             if (adapter != null) {
                 Method size = adapter.getClass().getMethod("getItemCount");
                 Method type = adapter.getClass().getMethod("getItemViewType", int.class);
-                int count = (Integer) size.invoke(adapter);
-                for (int i = 0; i < Math.min(count, 40); i++) {
-                    if (((Integer) type.invoke(adapter, i)) == CLIPBOARD_SUGGESTION) {
-                        return true;
-                    }
-                }
+                for (int i = 0, count = (Integer) size.invoke(adapter); i < Math.min(count, 40); i++)
+                    if (((Integer) type.invoke(adapter, i)) == CLIPBOARD_SUGGESTION) return true;
             }
-        } catch (Throwable ignored) {
-            // AndroidX RecyclerView may be obfuscated; inspect visible rows.
-        }
-        // Defensive duplicate detection for the visible suggestion rows.
+        } catch (Throwable ignored) {}
         for (int i = 0; i < dropdown.getChildCount(); i++) {
-            View child = dropdown.getChildAt(i);
-            if (hasClipboardLabel(child, 0)) return true;
-        }
-        return false;
-    }
-
-    private static boolean hasClipboardLabel(View view, int depth) {
-        if (depth > 6) return false;
-        if (view instanceof TextView) {
-            CharSequence text = ((TextView) view).getText();
-            return text != null && (
-                    "コピーしたリンク".contentEquals(text)
-                    || "Copied link".contentEquals(text));
-        }
-        if (!(view instanceof ViewGroup)) return false;
-        ViewGroup group = (ViewGroup) view;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            if (hasClipboardLabel(group.getChildAt(i), depth + 1)) return true;
-        }
-        return false;
-    }
-
-    private static ViewGroup findNativeReference(ViewGroup dropdown, Class<?> cls) {
-        for (int i = 0; i < dropdown.getChildCount(); i++) {
-            View child = dropdown.getChildAt(i);
-            if (child.getClass() == cls && child instanceof ViewGroup) {
-                return (ViewGroup) child;
+            List<TextView> texts = new ArrayList<>();
+            collectTexts(dropdown.getChildAt(i), texts, 0);
+            for (TextView text : texts) {
+                CharSequence value = text.getText();
+                if (value != null && ("コピーしたリンク".contentEquals(value)
+                        || "コピーしたテキスト".contentEquals(value)
+                        || "Copied link".contentEquals(value) || "Copied text".contentEquals(value)))
+                    return true;
             }
         }
-        return null;
-    }
-
-    private static TextView getLine(View root, Activity activity,
-            String idName, int fallbackIndex) {
-        int id = id(activity, idName, "id");
-        if (id != 0) {
-            View found = root.findViewById(id);
-            if (found instanceof TextView) return (TextView) found;
-        }
-        List<TextView> lines = new ArrayList<>();
-        collectTexts(root, lines, 0);
-        return lines.size() > fallbackIndex ? lines.get(fallbackIndex) : null;
+        return false;
     }
 
     private static void collectTexts(View root, List<TextView> out, int depth) {
         if (depth > 6) return;
-        if (root instanceof TextView) {
-            out.add((TextView) root);
-        } else if (root instanceof ViewGroup) {
+        if (root instanceof TextView) out.add((TextView) root);
+        else if (root instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) root;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                collectTexts(group.getChildAt(i), out, depth + 1);
-            }
+            for (int i = 0; i < group.getChildCount(); i++) collectTexts(group.getChildAt(i), out, depth + 1);
         }
-    }
-
-    private static int id(Context ctx, String name, String type) {
-        return ctx.getResources().getIdentifier(name, type, CHROME);
     }
 
     private static int dp(Context ctx, int units) {
         return Math.round(ctx.getResources().getDisplayMetrics().density * units);
     }
-
     private NativeClipboardSuggestion() {}
 }

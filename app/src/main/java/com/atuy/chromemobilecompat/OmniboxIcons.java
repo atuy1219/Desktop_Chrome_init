@@ -179,25 +179,27 @@ final class OmniboxIcons {
             favicon(view, bitmap);
             return;
         }
-        Drawable globe = installed(view.getContext(), "ic_globe_24dp");
-        if (globe != null) {
-            view.setImageDrawable(globe.mutate());
-        } else {
-            Bitmap generic = Bitmap.createBitmap(edge, edge, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(generic);
-            canvas.scale(edge / 24f, edge / 24f);
-            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-            p.setColor(Color.WHITE);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1.6f);
-            canvas.drawCircle(12, 12, 9, p);
-            canvas.drawOval(8, 3, 16, 21, p);
-            canvas.drawLine(3, 12, 21, 12, p);
-            view.setImageBitmap(generic);
-        }
-        view.setImageTintList(ColorStateList.valueOf(tint));
+        suggestionGlyph(view, "ic_globe_24dp", tint);
         view.setClipToOutline(false);
         view.requestLayout();
+    }
+
+    static void suggestionGlyph(ImageView view, String name, int tint) {
+        int edge = pageIconSize(view.getContext());
+        Bitmap generic = Bitmap.createBitmap(edge, edge, Bitmap.Config.ARGB_8888);
+        generic.setDensity(view.getResources().getDisplayMetrics().densityDpi);
+        Canvas canvas = new Canvas(generic);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(Color.WHITE);
+        // Use the source artwork even if release resource names were collapsed
+        // or the installed desktop variant exposes a different globe glyph.
+        if (!ChromiumSuggestionGlyphs.draw(canvas, edge, name, paint)) return;
+        view.setImageBitmap(generic);
+        view.setImageTintList(ColorStateList.valueOf(tint));
+        view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        view.setVisibility(View.VISIBLE);
+        if (REPORTED.add(name)) XposedBridge.log("Omnibox icon " + name
+                + " source=Chromium-vector sizePx=" + edge);
     }
 
     static void favicon(ImageView view, Bitmap bitmap) {

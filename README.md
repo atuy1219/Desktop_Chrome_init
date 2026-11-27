@@ -2,6 +2,13 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## 0.5.8-clipboard-text (test only)
+
+- Fallback page icon uses the exact Chromium 159 filled continent globe vector from ui/android/java/res/drawable/ic_globe_24dp.xml rather than a generic longitude/latitude globe. Real favicon remains first choice.
+- Clipboard fallback now supports copied text and HTTP(S) links; follows Chromium ClipboardSuggestionProcessor's search/globe decoration and reveal/conceal eye assets. The stable fixed-height fallback row inherits native suggestion text metrics/colors and stays hidden by default. Tap refines the Omnibox; user submits manually. It is not a native autocomplete provider.
+- Fresh single-item text only, no sensitive-flagged items, no unknown/OTR profile, no startup clipboard reads, no persistence or logging of contents; revalidate clip timestamp before reveal/refine. Native candidate takes precedence. Currently attached to the current-page fallback flow.
+- Chromium artwork BSD notices in APK assets. Device verification required.
+
 ## 0.5.7-leading-favicon (test only)
 
 - Explicitly bind the page's decoration ImageView, mobile Chrome's 24dp icon size, no favicon tint and rounded outline. Measure actual native decoration/title geometry. If the unbound/inlined SuggestionLayout has no usable leading slot, insert a dedicated leading sibling and reserve the required width, preserving the existing share/copy/edit row.

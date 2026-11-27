@@ -79,6 +79,7 @@ final class CurrentPageCardFix {
         ViewGroup dropdown;
         FrameLayout suggestionContainer;
         ViewGroup card;
+        ViewGroup clipboardCard;
         ImageView pageIcon;
         int baselineTopPadding;
         int cardHeight;
@@ -267,6 +268,7 @@ final class CurrentPageCardFix {
             ViewGroup clipboardCard = NativeClipboardSuggestion.maybeBuild(
                     activity, (ViewGroup) dropdown, session.urlBar,
                     page.offTheRecord);
+            session.clipboardCard = clipboardCard;
             if (clipboardCard != null) {
                 LinearLayout cardGroup = new LinearLayout(activity);
                 cardGroup.setOrientation(LinearLayout.VERTICAL);
@@ -322,6 +324,14 @@ final class CurrentPageCardFix {
                         || !session.urlBar.hasFocus()) return true;
                 if (nativePageCardPresent(session.dropdown)) {
                     removeCard(session);
+                    return true;
+                }
+                if (session.clipboardCard != null
+                        && NativeClipboardSuggestion.nativeClipboardPresent(session.dropdown)) {
+                    // A real native candidate arrived after our fallback.
+                    // Rebuild once without the duplicate; preserve normal card flow.
+                    removeCard(session);
+                    session.urlBar.post(() -> tryShow(session, 0));
                     return true;
                 }
                 int actualPadding = session.dropdown.getPaddingTop();
@@ -544,9 +554,7 @@ final class CurrentPageCardFix {
             // descriptor is resolved once per Chrome update.
             favicon = callBitmap(tab, "getFavicon");
         }
-        Boolean offTheRecord = callBoolean(tab, "isOffTheRecord");
-        if (offTheRecord == null) offTheRecord = callBoolean(tab, "isIncognito");
-        return new Page(url, title, favicon, offTheRecord, tab);
+        return new Page(url, title, favicon, verifiedOffTheRecord(tab), tab);
     }
 
     private static Object findActiveTab(Activity activity) {
@@ -668,6 +676,33 @@ final class CurrentPageCardFix {
         }
     }
 
+    private static Boolean verifiedOffTheRecord(Object tab) {
+        if (tab == null) return null;
+        Boolean direct = callBoolean(tab, "isOffTheRecord");
+        if (direct != null) return direct;
+        // Profile.isOffTheRecord is defined by the actual OTR profile ID,
+        // not the visual incognito theme. Never infer regular from a color.
+        try {
+            for (Method method : tab.getClass().getMethods()) {
+                if (method.getParameterCount() != 0 || Modifier.isStatic(method.getModifiers())
+                        || !method.getReturnType().getName().equals(
+                            "org.chromium.chrome.browser.profiles.Profile")) continue;
+                Object profile = method.invoke(tab);
+                if (profile == null) continue;
+                Boolean off = callBoolean(profile, "isOffTheRecord");
+                if (off != null) return off;
+                for (Field field : profile.getClass().getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers()) || !field.getType().getName().equals(
+                            "org.chromium.chrome.browser.profiles.OtrProfileId")) continue;
+                    field.setAccessible(true);
+                    return field.get(profile) != null;
+                }
+            }
+        } catch (Throwable ignored) {}
+        // Unknown is intentionally not treated as a regular profile.
+        return null;
+    }
+
     private static Boolean callBoolean(Object object, String method) {
         try {
             Object result = object.getClass().getMethod(method).invoke(object);
@@ -730,6 +765,7 @@ final class CurrentPageCardFix {
         }
         session.card = null;
         session.pageIcon = null;
+        session.clipboardCard = null;
         session.dropdown = null;
         session.suggestionContainer = null;
         session.cardHeight = 0;
