@@ -84,34 +84,7 @@ def patch_result(text):
         return text
     if '#include "base/android/device_info.h"' not in text:
         text = replace_once(
-            text, r'^#include "build/android_buildflags.h"
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("src", type=pathlib.Path)
-    parser.add_argument("--check", action="store_true", help="validate anchors without writing")
-    args = parser.parse_args()
-    try:
-        files = [(args.src / CLASSIFIER, patch_classifier),
-                 (args.src / VERBATIM, patch_verbatim),
-                 (args.src / RESULT, patch_result)]
-        # Validate all anchors before writing any file.
-        changes = []
-        for path, patch in files:
-            original = path.read_text(encoding="utf-8")
-            updated = patch(original)
-            changes.append((path, original, updated))
-        for path, original, updated in changes:
-            if original != updated and not args.check:
-                path.write_text(updated, encoding="utf-8")
-            print(f"{'already patched' if original == updated else 'compatible' if args.check else 'patched'}: {path}")
-    except (OSError, ValueError) as exc:
-        print(f"Refusing to apply an unverified patch: {exc}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-,
+            text, r'^#include "build/android_buildflags.h"$',
             '#include "build/android_buildflags.h"\n'
             '#if BUILDFLAG(IS_DESKTOP_ANDROID)\n'
             '#include "base/android/device_info.h"\n'
