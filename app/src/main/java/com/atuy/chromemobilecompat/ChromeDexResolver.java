@@ -1606,7 +1606,7 @@ final class ChromeDexResolver {
                             || !isObjectDescriptor(p[0])) continue;
                     String tab = p[0];
                     String from = null, async = null;
-                    int creators = 0, callbacks = 0, requests = 0;
+                    int creators = 0, ownerGetters = 0, callbacks = 0, requests = 0;
                     for (MethodDef other : methods) {
                         MethodId m = dex.methods[other.methodIndex];
                         Proto op = dex.protos[m.protoIndex];
@@ -1614,8 +1614,14 @@ final class ChromeDexResolver {
                         if ((other.accessFlags & ACC_STATIC) != 0) {
                             if (q.length == 1 && tab.equals(q[0])
                                     && owner.descriptor.equals(op.returnDescriptor)) {
-                                from = m.name;
-                                creators++;
+                                ownerGetters++;
+                                // TabFavicon.get(Tab) has the same signature.
+                                // Only from(Tab) constructs its own user-data object.
+                                if ("from".equals(m.name)
+                                        || constructsOwner(dex, other, owner.descriptor)) {
+                                    from = m.name;
+                                    creators++;
+                                }
                             }
                             if ("V".equals(op.returnDescriptor) && q.length == 3
                                     && tab.equals(q[0])
@@ -1630,7 +1636,7 @@ final class ChromeDexResolver {
                     }
                     String[] candidate = {descriptorToClassName(owner.descriptor), id.name,
                             tab, creators == 1 ? from : null, requests == 1 ? async : null};
-                    if (creators == 1 && callbacks == 1) exact.add(candidate);
+                    if (ownerGetters >= 1 && callbacks == 1) exact.add(candidate);
                     else if (tab.endsWith("/tab/Tab;") && creators == 1) named.add(candidate);
                 }
             }
@@ -1639,6 +1645,21 @@ final class ChromeDexResolver {
         if (exact.isEmpty() && named.size() == 1) return named.get(0);
         throw new IOException("TabFavicon candidates exact=" + exact.size()
                 + " named=" + named.size());
+    }
+
+    private static boolean constructsOwner(DexFile dex, MethodDef method, String owner) {
+        if (method.codeOffset == 0) return false;
+        short[] code = dex.readCodeUnits(method.codeOffset);
+        for (int i = 0; i < code.length;) {
+            int width = instructionWidth(code, i);
+            if (width <= 0 || i + width > code.length) break;
+            if ((code[i] & 0xff) == 0x22 && width == 2) {
+                int index = code[i + 1] & 0xffff;
+                if (index < dex.types.length && owner.equals(dex.types[index])) return true;
+            }
+            i += width;
+        }
+        return false;
     }
 
     private ChromeDexResolver() {}

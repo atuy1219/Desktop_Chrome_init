@@ -45,6 +45,8 @@ public final class ModernEntry extends XposedModule {
                 + " api=" + getApiVersion());
 
         if (TARGET_PACKAGE.equals(processName)) {
+            try { OmniboxIcons.initialize(getModuleApplicationInfo()); }
+            catch (Throwable t) { e("Omnibox asset initialization failed: " + t.getClass().getSimpleName()); }
             startNativeProbe("module-loaded");
             scheduleRetry(0L);
         }

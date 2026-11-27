@@ -3,7 +3,9 @@ package com.atuy.chromemobilecompat;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -13,6 +15,9 @@ import android.view.View;
 import android.widget.ImageView;
 import com.atuy.chromemobilecompat.compat.XposedBridge;
 
+import java.io.InputStream;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipEntry;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -27,6 +32,12 @@ import java.util.Set;
  */
 final class OmniboxIcons {
     private static final Set<String> REPORTED = new HashSet<>();
+    private static volatile String moduleApk;
+    private static Bitmap shareLtr, shareRtl;
+
+    static void initialize(ApplicationInfo info) {
+        if (info != null) moduleApk = info.sourceDir;
+    }
 
     static void action(ImageView view, String name, int tint) {
         Context context = view.getContext();
@@ -38,20 +49,51 @@ final class OmniboxIcons {
         bitmap.setDensity(context.getResources().getDisplayMetrics().densityDpi);
         Canvas canvas = new Canvas(bitmap);
         Drawable drawable = installed(context, name);
+        String source;
         if (drawable != null) {
             drawable = drawable.mutate();
             drawable.setTint(Color.WHITE);
             drawable.setBounds(0, 0, size, size);
             drawable.draw(canvas);
+            source = "Chrome-resource";
         } else {
-            drawFallback(canvas, size, name, view.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL);
+            boolean rtl = view.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+            Bitmap share = "ic_share_white_24dp".equals(name) ? bundledShare(rtl) : null;
+            if (valid(share)) {
+                Paint filter = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+                canvas.drawBitmap(share, null, new android.graphics.Rect(0, 0, size, size), filter);
+                source = "Chromium-png";
+            } else {
+                drawFallback(canvas, size, name, rtl);
+                source = "ic_share_white_24dp".equals(name) ? "emergency-geometry" : "Chromium-vector";
+            }
         }
         view.setImageBitmap(bitmap);
         view.setImageTintList(ColorStateList.valueOf(tint));
         view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
         if (REPORTED.add(name)) XposedBridge.log("Omnibox icon " + name
-                + " source=" + (drawable == null ? "bundled-geometry" : "Chrome-resource")
+                + " source=" + source
                 + " sizePx=" + size);
+    }
+
+    private static Bitmap bundledShare(boolean rtl) {
+        Bitmap cached = rtl ? shareRtl : shareLtr;
+        if (valid(cached)) return cached;
+        String apk = moduleApk;
+        if (apk == null) return null;
+        try (ZipFile zip = new ZipFile(apk)) {
+            String name = rtl ? "assets/chromium_share_rtl.png" : "assets/chromium_share_ltr.png";
+            ZipEntry asset = zip.getEntry(name);
+            if (asset == null) return null;
+            try (InputStream stream = zip.getInputStream(asset)) {
+                Bitmap bitmap = BitmapFactory.decodeStream(stream);
+                if (rtl) shareRtl = bitmap; else shareLtr = bitmap;
+                return bitmap;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("Omnibox share asset unavailable", t);
+            return null;
+        }
     }
 
     private static Drawable installed(Context context, String name) {

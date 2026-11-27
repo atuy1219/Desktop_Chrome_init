@@ -33,7 +33,7 @@ final class ChromeUiDiscovery {
     private static final String KEY_SCHEMA = "uiDiscoverySchema";
     // Increment when the module changes discovery logic. Re-scan on the
     // next Chrome start even if the official Chrome version stays the same.
-    private static final int DISCOVERY_SCHEMA = 2;
+    private static final int DISCOVERY_SCHEMA = 3;
     private static final String KEY_FAV_CLASS = "faviconClass";
     private static final String KEY_FAV_METHOD = "faviconMethod";
 
