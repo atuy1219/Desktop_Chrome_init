@@ -22,6 +22,8 @@ final class ChromeInputCompatibility {
     private static final String TARGET = "com.android.chrome";
     private static final String PC_FEATURE = "android.hardware.type.pc";
     private static volatile boolean desktopExperienceHooked;
+    private static volatile boolean editUrlProcessorHooked;
+    private static final ThreadLocal<Integer> EDIT_URL_DEPTH = new ThreadLocal<>();
     private static volatile boolean keyboardDebounceHooked;
 
     private ChromeInputCompatibility() {}
@@ -41,19 +43,47 @@ final class ChromeInputCompatibility {
                                 || !(param.args[0] instanceof Context)) return;
                         Context context = (Context) param.args[0];
                         if (!shouldUseMobileOmnibox(context)) return;
-                        // Chrome 158's EditUrlSuggestionProcessor rejects the
-                        // mobile current-page card when this is true. Restore
-                        // the phone focus/edit flow and native card, including
-                        // favicon, URL color and share/copy/edit actions.
-                        // Do not override DeviceInfo.isDesktop() or native
-                        // platform detection: desktop extensions must remain.
-                        param.setResult(false);
+                        // Preserve the established desktop focus flow. Only the
+                        // current-page processor may opt into mobile presentation.
+                        // Native zero-prefix match generation is independent.
+                        Integer depth = EDIT_URL_DEPTH.get();
+                        param.setResult(depth == null || depth == 0);
                     }
                 });
                 desktopExperienceHooked = true;
-                log("Omnibox mobile-experience hook installed");
+                log("Omnibox focus compatibility hook installed");
             } catch (Throwable t) {
-                log("Omnibox mobile-experience hook unavailable: " + t);
+                log("Omnibox focus compatibility hook unavailable: " + t);
+            }
+        }
+
+        if (desktopExperienceHooked && !editUrlProcessorHooked) {
+            try {
+                Class<?> processor = Class.forName(
+                        "org.chromium.chrome.browser.omnibox.suggestions.editurl.EditUrlSuggestionProcessor",
+                        false, loader);
+                Class<?> match = Class.forName(
+                        "org.chromium.components.omnibox.AutocompleteMatch", false, loader);
+                Method method = processor.getDeclaredMethod(
+                        "doesProcessSuggestion", match, int.class);
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Integer depth = EDIT_URL_DEPTH.get();
+                        EDIT_URL_DEPTH.set(depth == null ? 1 : depth + 1);
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Integer depth = EDIT_URL_DEPTH.get();
+                        if (depth == null || depth <= 1) EDIT_URL_DEPTH.remove();
+                        else EDIT_URL_DEPTH.set(depth - 1);
+                    }
+                });
+                editUrlProcessorHooked = true;
+                log("Scoped mobile EditUrlSuggestionProcessor hook installed");
+            } catch (Throwable t) {
+                log("Scoped edit URL processor unavailable (native behavior retained): " + t);
             }
         }
 
@@ -85,8 +115,7 @@ final class ChromeInputCompatibility {
 
     private static boolean shouldUseMobileOmnibox(Context context) {
         if (!shouldApplyFix(context)) return false;
-        // Leave genuine tablet/desktop configurations to Chromium. On a phone,
-        // the mobile edit card is intentional even with Desktop Chrome installed.
+        // Leave genuine tablet/desktop configurations to Chromium.
         Configuration config = context.getResources().getConfiguration();
         int smallestWidth = config.smallestScreenWidthDp;
         return smallestWidth > 0 && smallestWidth < 600;

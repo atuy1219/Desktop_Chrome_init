@@ -2,13 +2,13 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
-## 0.5.0: mobile Omnibox and module identity
+## 0.5.1: Chrome 159 regression mitigation and module identity
 
 - New application ID: `com.atuy.chromemobilecompat`. Disable/uninstall the old `com.atuy.desktopchromeinit` module, install this module, enable it and scope it to `com.android.chrome`. Do not run both modules together.
-- On phone configurations (smallest width below 600 dp, no PC system feature, Desktop Chrome Extensions resource present), the Omnibox uses the mobile experience. Chrome 158's `EditUrlSuggestionProcessor` can then select the original current-page card with favicon, URL styling and share/copy/edit actions. All original eligibility checks remain intact. Chrome's global desktop identity and extensions hooks are unchanged.
-- The existing IME debounce workaround remains separate. Tapping the Omnibox can clear its input as in mobile Chrome; use the current-page edit action to edit the current URL.
-- Clipboard suggestions are still unresolved: Chrome 158 excludes the native clipboard provider in `AutocompleteClassifier::DefaultOmniboxProviders` for Desktop Android. Changing Java presentation cannot restore this provider; exact APK/native analysis is required. No synthetic clipboard entries or polling are introduced.
-- Source-validated against Chromium 158.0.8127.42; device verification is required. No shortcut changes.
+- Restores the previous desktop focus compatibility behavior after 0.5.0 regressed the current-page card and IME on Chrome 159.0.8154.18. Only within the original EditUrlSuggestionProcessor eligibility method is mobile experience reported, if its runtime symbols resolve. All native eligibility checks remain intact.
+- Chrome 159's ZeroSuggestVerbatimMatchProvider rejects ordinary web pages at compile time for Desktop Android; its AutocompleteClassifier also excludes kClipboard. Both native paths require exact APK/native analysis. The scoped Java hook cannot create missing matches. No synthetic clipboard entries or polling are introduced.
+- Bottom Bar: align extension icons using actual native button vertical padding (including asymmetric padding when the bottom omnibox is active). Clear inherited vertical container margins; retain the existing single-slot layout and extension popup behavior.
+- Existing IME debounce workaround retained. Source-validated against Chromium 159.0.8154.18; device verification and runtime symbol validation required. No shortcut changes.
 
 ## Compatibility model
 
@@ -102,7 +102,7 @@ APK build alone does not prove the Extensions popup is working.
 On unsupported phone devices that install the Desktop Android Chrome APK, the
 module additionally attempts two isolated Omnibox hooks:
 
-- `OmniboxCapabilities.hasDesktopExperience(Context)`: historical 0.4.12 workaround retained the URL. Superseded by the 0.5.0 mobile-experience hook above; the global desktop identity remains untouched.
+- `OmniboxCapabilities.hasDesktopExperience(Context)`: historical 0.4.12 workaround retained the URL. Restored with a scoped presentation exception in 0.5.1; the global desktop identity remains untouched.
 - `OmniboxFeatures.isDebounceKeyboardVisibilityEnabled()`: disable the
   internal 150 ms IME visibility debounce and use immediate show/hide requests
   instead. This is an experimental workaround for stale keyboard state; it

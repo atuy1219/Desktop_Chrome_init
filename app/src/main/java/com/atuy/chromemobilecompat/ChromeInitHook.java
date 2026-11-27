@@ -2161,10 +2161,14 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
                     containerLp.width != 0
                             || containerLp.weight != 1.0f
                             || containerLp.height
-                                    != ViewGroup.LayoutParams.MATCH_PARENT;
+                                    != ViewGroup.LayoutParams.MATCH_PARENT
+                            || containerLp.topMargin != 0 || containerLp.bottomMargin != 0
+                            || containerLp.gravity != android.view.Gravity.CENTER_VERTICAL;
             containerLp.width = 0;
             containerLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
             containerLp.weight = 1.0f;
+            containerLp.topMargin = 0;
+            containerLp.bottomMargin = 0;
             containerLp.gravity = android.view.Gravity.CENTER_VERTICAL;
             if (containerChanged) {
                 extensionsToolbar.setLayoutParams(containerLp);
@@ -2207,6 +2211,22 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             // margins, pinned action + Extensions appears as a tight "oo"
             // cluster while the surrounding native buttons stay put.
             int packedButtonWidth = buttonWidth;
+
+            // Chromium 159 BottomBarView applies asymmetric vertical padding
+            // when the bottom omnibox is present. The relocated tablet toolbar
+            // does not participate in BottomBarButtonContainer.setTargetPaddings.
+            // Match the actual native button padding, not a fixed pixel offset.
+            if (referenceButton != null) {
+                if (menuButton != null) {
+                    matchBottomBarVerticalPadding(menuButton, referenceButton);
+                }
+                if (actionListView instanceof ViewGroup) {
+                    ViewGroup actions = (ViewGroup) actionListView;
+                    for (int i = 0; i < actions.getChildCount(); i++) {
+                        matchBottomBarVerticalPadding(actions.getChildAt(i), referenceButton);
+                    }
+                }
+            }
 
             if (menuButton != null) {
                 ViewGroup.LayoutParams old = menuButton.getLayoutParams();
@@ -2270,6 +2290,15 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             log("bottom bar equal-slot apply failed: " + stackSummary(t));
+        }
+    }
+
+    private static void matchBottomBarVerticalPadding(View button, View reference) {
+        int top = reference.getPaddingTop();
+        int bottom = reference.getPaddingBottom();
+        if (button.getPaddingTop() != top || button.getPaddingBottom() != bottom) {
+            button.setPaddingRelative(button.getPaddingStart(), top,
+                    button.getPaddingEnd(), bottom);
         }
     }
 
