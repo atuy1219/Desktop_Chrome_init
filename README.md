@@ -9,7 +9,7 @@ LSPosed compatibility module for using Desktop Chrome on Android phones with mob
 - Chrome 159's ZeroSuggestVerbatimMatchProvider rejects ordinary web pages at compile time for Desktop Android; its AutocompleteClassifier also excludes kClipboard. Both native paths require exact APK/native analysis. The scoped Java hook cannot create missing matches. No synthetic clipboard entries or polling are introduced.
 - Bottom Bar: align extension icons using actual native button vertical padding (including asymmetric padding when the bottom omnibox is active). Clear inherited vertical container margins; retain the existing single-slot layout and extension popup behavior.
 - Omnibox eligibility and capability hooks now fall back to DEX discovery using the original edit-card metrics and the static Context-to-boolean call within the eligibility method. If absent, inlined, or ambiguous, the capability override is not installed. No versionCode or R8 mapping table is used.
-- For a source-built Desktop Chromium, run `python3 tools/patch_chromium_omnibox.py /path/to/chromium/src` before building. This restores the real native verbatim and clipboard providers on non-PC Android devices; it does not modify a prebuilt Google Chrome APK. See `tools/README.md`.
+- For a source-built Desktop Chromium, run `python3 tools/patch_chromium_omnibox.py /path/to/chromium/src` before building. This enables the native verbatim and clipboard providers and mobile zero-prefix grouping on non-PC Android devices; it does not modify a prebuilt Google Chrome APK. See `tools/README.md`.
 - Existing IME debounce workaround retained. Source-validated against Chromium 159.0.8154.18; device verification and runtime symbol validation required. No shortcut changes.
 
 ## Compatibility model

@@ -35,6 +35,9 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Test native source patch
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
       - name: Build signed release APK
         run: gradle :app:assembleRelease --stacktrace
 
