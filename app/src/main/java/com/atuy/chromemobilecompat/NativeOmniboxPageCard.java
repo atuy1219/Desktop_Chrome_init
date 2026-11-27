@@ -127,7 +127,7 @@ final class NativeOmniboxPageCard {
             if (card.getChildCount() > 0 && card.getChildAt(0) instanceof ImageView) {
                 ImageView decoration = (ImageView) card.getChildAt(0);
                 if (favicon != null) {
-                    decoration.setImageBitmap(favicon);
+                    OmniboxIcons.favicon(decoration, favicon);
                 } else {
                     int globe = id(activity, "ic_globe_24dp", "drawable");
                     decoration.setImageResource(
@@ -281,11 +281,6 @@ final class NativeOmniboxPageCard {
         final String[] names = {
                 "ic_share_white_24dp", "ic_content_copy", "ic_edit_24dp"
         };
-        final int[] fallbackIcons = {
-                android.R.drawable.ic_menu_share,
-                android.R.drawable.ic_menu_save,
-                android.R.drawable.ic_menu_edit
-        };
         final String[] labelsJa = {"共有", "コピー", "編集"};
         final String[] labelsEn = {"Share", "Copy", "Edit"};
         Runnable[] handlers = {
@@ -328,10 +323,7 @@ final class NativeOmniboxPageCard {
             if (foreground != 0) {
                 button.setForeground(activity.getDrawable(foreground));
             }
-            int icon = id(activity, names[i], "drawable");
-            button.setImageResource(icon == 0 ? fallbackIcons[i] : icon);
-            button.setImageTintList(
-                    ColorStateList.valueOf(title.getCurrentTextColor()));
+            OmniboxIcons.action(button, names[i], title.getCurrentTextColor());
             button.setContentDescription(ja ? labelsJa[i] : labelsEn[i]);
             final Runnable callback = handlers[i];
             button.setOnClickListener(view -> callback.run());
@@ -546,20 +538,12 @@ final class NativeOmniboxPageCard {
         };
         String[] jaLabels = {"共有", "コピー", "編集"};
         String[] enLabels = {"Share", "Copy", "Edit"};
-        int[] fallback = {
-            android.R.drawable.ic_menu_share,
-            android.R.drawable.ic_menu_save,
-            android.R.drawable.ic_menu_edit
-        };
         boolean japanese = "ja".equals(activity.getResources().getConfiguration()
                 .getLocales().get(0).getLanguage());
         ColorStateList tint = ColorStateList.valueOf(nativeLine1.getCurrentTextColor());
         for (int i = 0; i < actions.size(); i++) {
             ImageView action = actions.get(i);
-            int resource = id(activity, iconNames[i], "drawable");
-            action.setImageResource(resource == 0 ? fallback[i] : resource);
-            action.setImageTintList(tint);
-            action.setForegroundTintList(tint);
+            OmniboxIcons.action(action, iconNames[i], nativeLine1.getCurrentTextColor());
             action.setVisibility(View.VISIBLE);
             action.setContentDescription(japanese ? jaLabels[i] : enLabels[i]);
             final Runnable callback = callbacks[i];
@@ -664,9 +648,9 @@ final class NativeOmniboxPageCard {
             }
             List<ImageView> fallbackIcons = new ArrayList<>();
             collectImages(card, fallbackIcons, 0);
-            for (int j = 0; j < fallbackIcons.size(); j++) {
-                fallbackIcons.get(j).setImageTintList(ColorStateList.valueOf(
-                        j == 0 ? secondary : primary));
+            // The first image is the page favicon, not a monochrome action.
+            for (int j = 1; j < fallbackIcons.size(); j++) {
+                fallbackIcons.get(j).setImageTintList(ColorStateList.valueOf(primary));
             }
             Drawable source = reference.getBackground();
             if (source != null && source.getConstantState() != null) {

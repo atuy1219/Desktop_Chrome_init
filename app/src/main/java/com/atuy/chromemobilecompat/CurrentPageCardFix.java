@@ -62,12 +62,14 @@ final class CurrentPageCardFix {
         final String title;
         final Bitmap favicon;
         final Boolean offTheRecord;
+        final Object tab;
 
-        Page(String url, String title, Bitmap favicon, Boolean offTheRecord) {
+        Page(String url, String title, Bitmap favicon, Boolean offTheRecord, Object tab) {
             this.url = url;
             this.title = title;
             this.favicon = favicon;
             this.offTheRecord = offTheRecord;
+            this.tab = tab;
         }
     }
 
@@ -251,6 +253,10 @@ final class CurrentPageCardFix {
                 XposedBridge.log("Current-page card: native row unavailable; "
                         + "styled fallback based on Chrome's own suggestion row");
             }
+            final ImageView pageIcon = firstImage(session.card, 0);
+            if (pageIcon != null && !OmniboxIcons.valid(page.favicon)) {
+                requestPageFavicon(session, activity, page, pageIcon);
+            }
             // An actual Chromium clipboard suggestion is already handled by
             // the normal RecyclerView. Only supply a native-view fallback when
             // a recent URL is missing and this is a verified regular tab.
@@ -365,7 +371,7 @@ final class CurrentPageCardFix {
 
         ImageView favicon = new ImageView(activity);
         if (page.favicon != null) {
-            favicon.setImageBitmap(page.favicon);
+            OmniboxIcons.favicon(favicon, page.favicon);
         } else {
             favicon.setImageResource(android.R.drawable.ic_menu_view);
             favicon.setImageTintList(ColorStateList.valueOf(secondary));
@@ -406,7 +412,7 @@ final class CurrentPageCardFix {
         actions.setGravity(Gravity.CENTER_VERTICAL);
 
         addAction(activity, actions, "share", "共有", "Share",
-                "ic_share_white_24dp", android.R.drawable.ic_menu_share,
+                "ic_share_white_24dp",
                 secondary, v -> {
                     Intent send = new Intent(Intent.ACTION_SEND);
                     send.setType("text/plain");
@@ -414,7 +420,7 @@ final class CurrentPageCardFix {
                     activity.startActivity(Intent.createChooser(send, null));
                 });
         addAction(activity, actions, "copy", "コピー", "Copy",
-                "ic_content_copy", android.R.drawable.ic_menu_save,
+                "ic_content_copy",
                 secondary, v -> {
                     ClipboardManager clipboard = (ClipboardManager)
                             activity.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -423,7 +429,7 @@ final class CurrentPageCardFix {
                     }
                 });
         addAction(activity, actions, "edit", "編集", "Edit",
-                "ic_edit_24dp", android.R.drawable.ic_menu_edit,
+                "ic_edit_24dp",
                 secondary, v -> {
                     if (session.urlBar instanceof EditText) {
                         EditText edit = (EditText) session.urlBar;
@@ -438,7 +444,7 @@ final class CurrentPageCardFix {
 
     private static void addAction(Activity activity, LinearLayout parent,
             String key, String japanese, String english,
-            String chromeDrawable, int defaultDrawable, int tint,
+            String chromeDrawable, int tint,
             View.OnClickListener click) {
         final boolean ja = activity.getResources()
                 .getConfiguration().getLocales().get(0)
@@ -455,11 +461,8 @@ final class CurrentPageCardFix {
                 && out.resourceId != 0) {
             button.setBackgroundResource(out.resourceId);
         }
-        int drawable = activity.getResources().getIdentifier(
-                chromeDrawable, "drawable", TARGET_PACKAGE);
         ImageView icon = new ImageView(activity);
-        icon.setImageResource(drawable != 0 ? drawable : defaultDrawable);
-        icon.setImageTintList(ColorStateList.valueOf(tint));
+        OmniboxIcons.action(icon, chromeDrawable, tint);
         button.addView(icon, new LinearLayout.LayoutParams(
                 dp(activity, 20), dp(activity, 20)));
         TextView label = new TextView(activity);
@@ -473,6 +476,48 @@ final class CurrentPageCardFix {
         button.setOnClickListener(click);
         parent.addView(button, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+    }
+
+    private static ImageView firstImage(View view, int depth) {
+        if (view == null || depth > 7) return null;
+        if (view instanceof ImageView) return (ImageView) view;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                ImageView found = firstImage(group.getChildAt(i), depth + 1);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static void requestPageFavicon(CardSession session, Activity activity,
+            Page page, ImageView image) {
+        // The callback can arrive after focus loss or navigation. Never put
+        // an old tab's favicon on a different page or recreate the card.
+        java.util.function.Consumer<Bitmap> accept = bitmap -> session.urlBar.post(() -> {
+            if (!OmniboxIcons.valid(bitmap) || SESSIONS.get(session.urlBar) != session
+                    || session.card == null || !session.urlBar.hasFocus()
+                    || !TextUtils.isEmpty(session.urlBar.getText())
+                    || !image.isAttachedToWindow() || firstImage(session.card, 0) != image
+                    || findActiveTab(activity) != page.tab
+                    || !page.url.equals(getTabUrl(page.tab, session.displayBeforeFocus))) return;
+            OmniboxIcons.favicon(image, bitmap);
+            XposedBridge.log("Current-page favicon: Chrome bitmap applied");
+        });
+        ChromeUiDiscovery.requestFavicon(page.tab, activity.getClassLoader(), accept);
+        // A favicon can become available after the tab finishes loading even
+        // if the Promise entry point was inlined. Use bounded retries only.
+        for (long delay : new long[]{250L, 1000L, 2500L}) {
+            session.urlBar.postDelayed(() -> {
+                if (SESSIONS.get(session.urlBar) != session || session.card == null
+                        || !session.urlBar.hasFocus() || !image.isAttachedToWindow()
+                        || firstImage(session.card, 0) != image) return;
+                Bitmap bitmap = ChromeUiDiscovery.currentFavicon(
+                        page.tab, activity.getClassLoader());
+                if (OmniboxIcons.valid(bitmap)) accept.accept(bitmap);
+            }, delay);
+        }
     }
 
     private static Page findPage(Activity activity, String displayUrl) {
@@ -498,7 +543,7 @@ final class CurrentPageCardFix {
         }
         Boolean offTheRecord = callBoolean(tab, "isOffTheRecord");
         if (offTheRecord == null) offTheRecord = callBoolean(tab, "isIncognito");
-        return new Page(url, title, favicon, offTheRecord);
+        return new Page(url, title, favicon, offTheRecord, tab);
     }
 
     private static Object findActiveTab(Activity activity) {

@@ -10,8 +10,8 @@ android {
         applicationId = "com.atuy.chromemobilecompat"
         minSdk = 29
         targetSdk = 35
-        versionCode = 40
-        versionName = "0.5.5-integrated-fallback"
+        versionCode = 41
+        versionName = "0.5.6-omnibox-icons"
         ndk { abiFilters += "arm64-v8a" }
     }
 

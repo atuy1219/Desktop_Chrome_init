@@ -2,6 +2,13 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## 0.5.6-omnibox-icons (test only)
+
+- All page-card renderers use the actual Chrome share/copy/edit drawables when available. No Android framework save/share/edit icon substitutions. Copy/edit fallback geometry is from Chromium 159's original BSD-licensed vector assets; share fallback uses a three-node glyph when the installed PNG cannot be resolved. Icons use a common small-icon size and tint.
+- TabFavicon discovery uses matching JNI signatures, not obfuscated Tab names. Re-resolves cached failures, prefers the live Tab class loader, creates a native TabFavicon user-data object if needed, requests Chrome's own local favicon DB via Promise, and uses bounded retries. Only the current card receives a valid bitmap and its tint is cleared. No external favicon service or network request is introduced.
+- Source references: Chromium EditUrlSuggestionProcessor, OmniboxDrawableState, TabFavicon, components/embedder_support/android/java/res/drawable/ic_content_copy.xml and components/browser_ui/styles/android/java/res/drawable/ic_edit_24dp.xml (Chromium BSD license).
+- Device verification required.
+
 ## 0.5.5-integrated-fallback (test only)
 
 - Consolidates PR #21 into PR #23: current-page card, copy/share/edit actions, Chrome view reuse, recent URL clipboard fallback, favicon discovery, and measured Bottom Bar glyph alignment.

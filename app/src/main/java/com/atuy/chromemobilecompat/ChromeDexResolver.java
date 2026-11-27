@@ -1588,52 +1588,57 @@ final class ChromeDexResolver {
      */
     static String[] findFaviconAccessor(ApplicationInfo appInfo) throws IOException {
         List<DexFile> dexes = loadApplicationDexFiles(appInfo);
-        ArrayList<String[]> matches = new ArrayList<>();
-        ArrayList<String[]> singleMethods = new ArrayList<>();
+        ArrayList<String[]> exact = new ArrayList<>();
+        ArrayList<String[]> named = new ArrayList<>();
         for (DexFile dex : dexes) {
             for (ClassDef owner : dex.classes.values()) {
-                String noFallbackName = null;
-                String fallbackName = null;
-                String tabDescriptor = null;
-                for (MethodDef def : dex.getDefinedMethods(owner)) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                // TabFavicon has JNI entry points: static Bitmap(Tab,boolean),
+                // static TabFavicon(Tab), and static void(Tab,Bitmap,GURL).
+                // Tie all three to the same descriptor, even if Tab is renamed.
+                for (MethodDef def : methods) {
                     if ((def.accessFlags & ACC_STATIC) == 0) continue;
                     MethodId id = dex.methods[def.methodIndex];
                     Proto proto = dex.protos[id.protoIndex];
-                    if (!"Landroid/graphics/Bitmap;".equals(proto.returnDescriptor)) {
-                        continue;
+                    String[] p = proto.parameterDescriptors;
+                    if (!"Landroid/graphics/Bitmap;".equals(proto.returnDescriptor)
+                            || p.length != 2 || !BOOLEAN.equals(p[1])
+                            || !isObjectDescriptor(p[0])) continue;
+                    String tab = p[0];
+                    String from = null, async = null;
+                    int creators = 0, callbacks = 0, requests = 0;
+                    for (MethodDef other : methods) {
+                        MethodId m = dex.methods[other.methodIndex];
+                        Proto op = dex.protos[m.protoIndex];
+                        String[] q = op.parameterDescriptors;
+                        if ((other.accessFlags & ACC_STATIC) != 0) {
+                            if (q.length == 1 && tab.equals(q[0])
+                                    && owner.descriptor.equals(op.returnDescriptor)) {
+                                from = m.name;
+                                creators++;
+                            }
+                            if ("V".equals(op.returnDescriptor) && q.length == 3
+                                    && tab.equals(q[0])
+                                    && "Landroid/graphics/Bitmap;".equals(q[1])
+                                    && "Lorg/chromium/url/GURL;".equals(q[2])) callbacks++;
+                        } else if (q.length == 0 && isObjectDescriptor(op.returnDescriptor)
+                                && (op.returnDescriptor.equals("Lorg/chromium/base/Promise;")
+                                    || methodReferencesString(dex, other, "Not eligible for favicon"))) {
+                            async = m.name;
+                            requests++;
+                        }
                     }
-                    String[] ps = proto.parameterDescriptors;
-                    if (ps.length == 1 && ps[0].endsWith("/tab/Tab;")) {
-                        noFallbackName = id.name;
-                        tabDescriptor = ps[0];
-                    } else if (ps.length == 2 && ps[0].endsWith("/tab/Tab;")
-                            && BOOLEAN.equals(ps[1])) {
-                        fallbackName = id.name;
-                        tabDescriptor = ps[0];
-                    }
-                }
-                if (fallbackName != null && noFallbackName != null) {
-                    matches.add(new String[] {
-                            descriptorToClassName(owner.descriptor),
-                            fallbackName, tabDescriptor
-                    });
-                }
-                if (fallbackName != null) {
-                    singleMethods.add(new String[] {
-                            descriptorToClassName(owner.descriptor),
-                            fallbackName, tabDescriptor
-                    });
+                    String[] candidate = {descriptorToClassName(owner.descriptor), id.name,
+                            tab, creators == 1 ? from : null, requests == 1 ? async : null};
+                    if (creators == 1 && callbacks == 1) exact.add(candidate);
+                    else if (tab.endsWith("/tab/Tab;") && creators == 1) named.add(candidate);
                 }
             }
         }
-        if (matches.size() == 1) return matches.get(0);
-        // The no-fallback overload may have been removed by R8. Permit a
-        // unique signature-only fallback; refuse a tie.
-        if (matches.isEmpty() && singleMethods.size() == 1) {
-            return singleMethods.get(0);
-        }
-        throw new IOException("TabFavicon DEX pairCandidates=" + matches.size()
-                + " fallbackCandidates=" + singleMethods.size());
+        if (exact.size() == 1) return exact.get(0);
+        if (exact.isEmpty() && named.size() == 1) return named.get(0);
+        throw new IOException("TabFavicon candidates exact=" + exact.size()
+                + " named=" + named.size());
     }
 
     private ChromeDexResolver() {}
