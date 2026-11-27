@@ -87,6 +87,11 @@ public final class XposedBridge {
         }
     }
 
+    // Fallback diagnostics must not log page or clipboard content from exceptions.
+    public static void log(String message, Throwable failure) {
+        log(message + " (" + failure.getClass().getSimpleName() + ")");
+    }
+
     private static XposedModule requireModule() {
         XposedModule current = module;
         if (current == null) {

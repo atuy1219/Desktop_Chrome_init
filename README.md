@@ -2,6 +2,14 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## 0.5.5-integrated-fallback (test only)
+
+- Consolidates PR #21 into PR #23: current-page card, copy/share/edit actions, Chrome view reuse, recent URL clipboard fallback, favicon discovery, and measured Bottom Bar glyph alignment.
+- These are temporary Java UI fallbacks, not restored native candidate generation. The page fallback skips an existing native edit-card adapter item when detectable. Clipboard fallback remains URL-only and requires a confirmed non-incognito profile. Native view roles are inherited from PR #21 and not guaranteed across future releases.
+- PR #23's modern module identity, working native bootstrap and null-tag Vector logging take precedence over earlier experimental implementations. All migrated UI diagnostics use the same logging bridge.
+- Independent PR #22 is a historical device-state diagnostic; not required for the main module. Source-rebuild recipes from PR #21 remain historical because the target is official Google Chrome.
+- Real-device testing is still required; no native function patch is installed.
+
 ## 0.5.4-native-probe (test only)
 
 - Vector logging: all Java framework log calls use a null tag; native snapshot reports are returned to Java via JNI and emitted through the same libxposed logging bridge. Native early loader messages remain available in logcat.
