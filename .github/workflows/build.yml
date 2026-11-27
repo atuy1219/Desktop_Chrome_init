@@ -72,15 +72,7 @@ jobs:
           "$READELF" -Ws "$RUNNER_TEMP/probe.so" > "$RUNNER_TEMP/probe-symbols.txt"
           grep -F 'Java_com_atuy_chromemobilecompat_ChromeNativeProbe_nativeSnapshot' "$RUNNER_TEMP/probe-symbols.txt"
           grep -F 'JNI_OnLoad' "$RUNNER_TEMP/probe-symbols.txt"
-          grep -E '[[:space:]]native_init
-          ls -lh app/build/outputs/ChromeMobileCompat-release.apk
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ChromeMobileCompat-release
-          path: app/build/outputs/ChromeMobileCompat-release.apk
-          if-no-files-found: error
- "$RUNNER_TEMP/probe-symbols.txt"
+          grep -w native_init "$RUNNER_TEMP/probe-symbols.txt"
 
           cp "$APK" app/build/outputs/ChromeMobileCompat-release.apk
           ls -lh app/build/outputs/ChromeMobileCompat-release.apk
