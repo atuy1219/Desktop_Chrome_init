@@ -26,6 +26,114 @@ import com.atuy.chromemobilecompat.compat.XposedBridge;
 final class MostVisitedFallback {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final int MAX_SITES = 6;
+    private static final long SNAPSHOT_AGE_MS = 15 * 60 * 1000L;
+    private static boolean callbackHooked;
+    private static volatile Field sourceField;
+    private static java.lang.ref.WeakReference<Object> capturedProfile =
+            new java.lang.ref.WeakReference<>(null);
+    private static List<Site> captured = Collections.emptyList();
+    private static long capturedAt;
+
+    static boolean captureReady(){return callbackHooked && sourceField!=null;}
+
+    static void installNamedCapture(ClassLoader loader) {
+        try {
+            installCapture(loader,
+                    "org.chromium.chrome.browser.suggestions.mostvisited.MostVisitedSitesBridge",
+                    "onURLsAvailable",
+                    "org.chromium.chrome.browser.suggestions.SiteSuggestion","source");
+        }catch(Throwable ignored){}
+    }
+
+    static synchronized void installCapture(ClassLoader loader,String owner,String method,
+            String siteClass,String source) {
+        try {
+            Class<?> cls=Class.forName(siteClass,false,loader);
+            Field field=cls.getDeclaredField(source);
+            if(field.getType()!=int.class || Modifier.isStatic(field.getModifiers()))return;
+            field.setAccessible(true);
+            sourceField=field;
+            if(callbackHooked)return;
+            Class<?> bridge=Class.forName(owner,false,loader);
+            Method callback=bridge.getDeclaredMethod(method,boolean.class,List.class);
+            if(Modifier.isStatic(callback.getModifiers()) || callback.getReturnType()!=void.class)return;
+            XposedBridge.hookMethod(callback,new com.atuy.chromemobilecompat.compat.XC_MethodHook(){
+                @Override protected void beforeHookedMethod(MethodHookParam param){
+                    // The live NTP observer has a delegate with both the
+                    // current Profile and a backreference to this very bridge.
+                    // Do not assign a callback to whichever tab is focused.
+                    if(!(param.args[1] instanceof List))return;
+                    capture(param.thisObject,(List<?>)param.args[1]);
+                }
+            });
+            callbackHooked=true;
+            XposedBridge.log("Most visited: native NTP callback hook installed");
+        }catch(Throwable failure){XposedBridge.log("Most visited callback unavailable",failure);}
+    }
+
+    private static Object profileFromBridge(Object bridge) throws Exception{
+        Object found=null;
+        for(Field observerField:bridge.getClass().getDeclaredFields()){
+            if(Modifier.isStatic(observerField.getModifiers()) || observerField.getType().isPrimitive()
+                    || observerField.getType().getName().startsWith("java."))continue;
+            observerField.setAccessible(true);
+            Object observer=observerField.get(bridge);
+            if(observer==null)continue;
+            for(Field delegateField:observer.getClass().getDeclaredFields()){
+                if(Modifier.isStatic(delegateField.getModifiers()) || delegateField.getType().isPrimitive()
+                        || delegateField.getType().getName().startsWith("java.")
+                        || delegateField.getType().getName().startsWith("android."))continue;
+                Object delegate;
+                try{delegateField.setAccessible(true);delegate=delegateField.get(observer);}
+                catch(Throwable ignored){continue;}
+                if(delegate==null)continue;
+                Object profile=null;
+                boolean sameBridge=false;
+                for(Field f:delegate.getClass().getDeclaredFields()){
+                    if(Modifier.isStatic(f.getModifiers()))continue;
+                    if(f.getType()==bridge.getClass()){
+                        f.setAccessible(true);sameBridge|=f.get(delegate)==bridge;
+                    }
+                    if("org.chromium.chrome.browser.profiles.Profile".equals(f.getType().getName())){
+                        f.setAccessible(true);profile=f.get(delegate);
+                    }
+                }
+                if(sameBridge && profile!=null){
+                    if(found!=null && found!=profile)return null;
+                    found=profile;
+                }
+            }
+        }
+        return found;
+    }
+
+    private static void capture(Object bridge,List<?> list){
+        try{
+            Object profile=profileFromBridge(bridge);
+            if(profile==null || !Boolean.FALSE.equals(profile.getClass()
+                    .getMethod("isOffTheRecord").invoke(profile)))return;
+            List<Site> sites=new ArrayList<>();
+            Set<String> seen=new HashSet<>();
+            for(Object item:list){
+                Site site=site(item,null,null);
+                if(site!=null && seen.add(site.url))sites.add(site);
+                if(sites.size()>=MAX_SITES)break;
+            }
+            synchronized(MostVisitedFallback.class){
+                capturedProfile=new java.lang.ref.WeakReference<>(profile);
+                captured=sites;
+                capturedAt=android.os.SystemClock.elapsedRealtime();
+            }
+            XposedBridge.log("Most visited: captured local NTP personal tiles="+sites.size());
+            MAIN.post(CurrentPageCardFix::refreshAfterFaviconResolved);
+        }catch(Throwable failure){XposedBridge.log("Most visited capture unavailable",failure);}
+    }
+
+    private static synchronized List<Site> snapshot(Object profile){
+        if(capturedProfile.get()!=profile || android.os.SystemClock.elapsedRealtime()-capturedAt
+                > SNAPSHOT_AGE_MS)return Collections.emptyList();
+        return new ArrayList<>(captured);
+    }
     private static final class Site {
         final String title, url;
         final Object gurl;
@@ -70,6 +178,13 @@ final class MostVisitedFallback {
             profileGetter.setAccessible(true);
             Object profile=profileGetter.invoke(tab);
             if (profile==null) return;
+            List<Site> saved=snapshot(profile);
+            if(!saved.isEmpty()){
+                render(activity,dropdown,tab,bar,destination,saved,active);
+                onChanged.run();
+                XposedBridge.log("Most visited fallback: reused local NTP tiles="+saved.size());
+                return;
+            }
             Method observe=null, score=null;
             List<Method> cleanup=new ArrayList<>();
             for (Method m:owner.getDeclaredMethods()) {
@@ -95,7 +210,10 @@ final class MostVisitedFallback {
                 }
             }
             if(destroy==null && cleanup.size()==1) destroy=cleanup.get(0);
-            if(observe==null || destroy==null) return;
+            if(observe==null || destroy==null) {
+                XposedBridge.log("Most visited: bridge methods inlined; waiting for native NTP callback");
+                return;
+            }
             Constructor<?> ctor=owner.getDeclaredConstructor(profileType);
             ctor.setAccessible(true);
             observe.setAccessible(true);
@@ -167,6 +285,8 @@ final class MostVisitedFallback {
             // Use personal TopSites only, not promotional/popular/custom tiles.
             // TileSource.TOP_SITES = 0; when the enum field is obfuscated,
             // require the bridge's own valid local suggestion score.
+            if(source==null && sourceField!=null &&
+                    sourceField.getDeclaringClass().isInstance(item))source=sourceField;
             if(source!=null){source.setAccessible(true);if(source.getInt(item)!=0)return null;}
             else if(score==null || !(((Number)score.invoke(bridge,gurl)).doubleValue()>=0))return null;
             String label=(String)title.get(item);

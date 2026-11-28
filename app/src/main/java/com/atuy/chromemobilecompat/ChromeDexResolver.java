@@ -1766,6 +1766,8 @@ final class ChromeDexResolver {
         ArrayList<String[]> allowedDev = new ArrayList<>();
         ArrayList<String[]> controllers = new ArrayList<>();
         ArrayList<String[]> builders = new ArrayList<>();
+        ArrayList<String[]> passiveMv = new ArrayList<>();
+        boolean lensIntentProtocol = false;
         final String contextType = "Landroid/content/Context;";
         final String uriType = "Landroid/net/Uri;";
         for (DexFile dex : files) {
@@ -1773,6 +1775,7 @@ final class ChromeDexResolver {
             for (ClassDef owner : dex.classes.values()) {
                 List<MethodDef> methods = dex.getDefinedMethods(owner);
                 boolean siteFactory = false, siteCallback = false, iconCallback = false;
+                String siteType = null, siteCallbackName = null;
                 String singleton = null, launch = null, lensParams = null;
                 int singletonCount = 0, launchCount = 0;
                 boolean builderConstructor = false;
@@ -1798,10 +1801,21 @@ final class ChromeDexResolver {
                     }
                     if (isStatic && isObjectDescriptor(p.returnDescriptor)
                             && Arrays.equals(a, new String[]{"Ljava/lang/String;",
-                            "Lorg/chromium/url/GURL;", INT, INT, INT})) siteFactory = true;
+                            "Lorg/chromium/url/GURL;", INT, INT, INT})) {
+                        siteFactory = true;
+                        siteType = p.returnDescriptor;
+                    }
+                    if ("Landroid/content/Intent;".equals(p.returnDescriptor)
+                            && methodReferencesString(dex, def, "googleapp://lens")
+                            && methodReferencesString(dex, def, "LensBitmapUriKey")
+                            && methodReferencesString(dex, def, "IncognitoUriKey")
+                            && methodReferencesString(dex, def, "com.google.android.googlequicksearchbox"))
+                        lensIntentProtocol = true;
                     if (!isStatic && VOID.equals(p.returnDescriptor)) {
-                        if (Arrays.equals(a, new String[]{BOOLEAN, "Ljava/util/List;"}))
+                        if (Arrays.equals(a, new String[]{BOOLEAN, "Ljava/util/List;"})) {
                             siteCallback = true;
+                            siteCallbackName = id.name;
+                        }
                         if (Arrays.equals(a, new String[]{"Lorg/chromium/url/GURL;"}))
                             iconCallback = true;
                     }
@@ -1887,6 +1901,12 @@ final class ChromeDexResolver {
                     }
                 }
                 if (siteFactory && siteCallback && iconCallback) {
+                    String sourceField = findSiteSourceField(files,siteType);
+                    // These methods are JNI entry points retained even when
+                    // the bridge constructor and Java observer setter disappear.
+                    if (sourceField != null && "onURLsAvailable".equals(siteCallbackName))
+                        passiveMv.add(new String[]{descriptorToClassName(owner.descriptor),
+                                siteCallbackName,descriptorToClassName(siteType),sourceField});
                     for (MethodDef def : methods) {
                         MethodId id = dex.methods[def.methodIndex];
                         Proto p = dex.protos[id.protoIndex];
@@ -1899,7 +1919,7 @@ final class ChromeDexResolver {
                 }
             }
         }
-        String[] result = new String[14];
+        String[] result = new String[19];
         if (mv.size() == 1) System.arraycopy(mv.get(0), 0, result, 0, 2);
         String[] gate = allowedDev.size() == 1 ? allowedDev.get(0)
                 : dev.size() == 1 ? dev.get(0) : null;
@@ -1913,12 +1933,51 @@ final class ChromeDexResolver {
                 lens.add(new String[]{c[0],c[1],c[2],b[0],b[1],b[2]});
         }
         if (lens.size() == 1) System.arraycopy(lens.get(0),0,result,6,6);
+        if (passiveMv.size() == 1) System.arraycopy(passiveMv.get(0),0,result,14,4);
+        if (lensIntentProtocol) result[18] = "true";
         com.atuy.chromemobilecompat.compat.XposedBridge.log(
                 "Extra UI resolver: dex=" + files.size() + " mostVisitedCandidates=" + mv.size()
                 + " devAvailableCandidates=" + dev.size() + " devPolicyCandidates=" + allowedDev.size()
                 + " lensControllers=" + controllers.size() + " lensBuilders=" + builders.size()
-                + " lensPairs=" + lens.size());
+                + " lensPairs=" + lens.size() + " mostVisitedCallback=" + passiveMv.size()
+                + " lensIntentProtocol=" + lensIntentProtocol);
         return result;
+    }
+
+    // SiteSuggestion(String title, GURL url, int titleSource, int source, int section):
+    // recover the source field from the constructor's incoming register.
+    // No hardcoded field name or numeric resource/method index.
+    private static String findSiteSourceField(List<DexFile> files, String type) {
+        if (type == null) return null;
+        ArrayList<String> matches = new ArrayList<>();
+        for (DexFile dex : files) {
+            ClassDef owner = dex.classes.get(type);
+            if (owner == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(owner)) {
+                MethodId id = dex.methods[def.methodIndex];
+                Proto p = dex.protos[id.protoIndex];
+                if (!"<init>".equals(id.name) || def.codeOffset == 0
+                        || !Arrays.equals(p.parameterDescriptors,new String[]{
+                        "Ljava/lang/String;","Lorg/chromium/url/GURL;",INT,INT,INT})) continue;
+                int receiver = dex.readUShort(def.codeOffset)-dex.readUShort(def.codeOffset+2);
+                int source = receiver+4;
+                short[] code = dex.readCodeUnits(def.codeOffset);
+                for (int i=0;i<code.length;) {
+                    int w=instructionWidth(code,i);
+                    if(w<=0 || i+w>code.length)break;
+                    int unit=code[i]&0xffff;
+                    if((unit&255)==0x59 && ((unit>>>8)&15)==source
+                            && ((unit>>>12)&15)==receiver) {
+                        int field=code[i+1]&0xffff;
+                        if(field<dex.fields.length && type.equals(dex.fields[field].ownerDescriptor)
+                                && INT.equals(dex.fields[field].typeDescriptor))
+                            matches.add(dex.fields[field].name);
+                    }
+                    i+=w;
+                }
+            }
+        }
+        return matches.size()==1?matches.get(0):null;
     }
 
     private ChromeDexResolver() {}

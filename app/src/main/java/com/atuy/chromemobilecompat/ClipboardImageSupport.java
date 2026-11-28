@@ -57,10 +57,38 @@ final class ClipboardImageSupport {
             Object instance=get.invoke(null);
             launch.invoke(instance,activity,p);
             XposedBridge.log("Clipboard image: Chrome Lens requested");
+        }catch(ReflectiveOperationException | LinkageError unavailable){
+            XposedBridge.log("Clipboard image: Chrome Lens entry unavailable",unavailable);
+            if(!(unavailable instanceof java.lang.reflect.InvocationTargetException)
+                    && ExtraUiCompatibility.lensIntentProtocol && launchLensIntent(activity,uri))return;
+            Toast.makeText(activity,"画像検索を開始できませんでした",Toast.LENGTH_SHORT).show();
         }catch(Throwable error){
-            XposedBridge.log("Clipboard image: Chrome Lens entry unavailable",error);
+            XposedBridge.log("Clipboard image: Chrome Lens launch failed",error);
             Toast.makeText(activity,"画像検索を開始できませんでした",Toast.LENGTH_SHORT).show();
         }
     }
+    // Fallback only after explicit user tap and only when the installed DEX
+    // still contains Chrome's exact Google Lens intent protocol. No R8 IDs.
+    // Android grants the receiver temporary access to this one selected URI.
+    private static boolean launchLensIntent(Activity activity,Uri uri){
+        if(uri==null || !"content".equals(uri.getScheme()) || !activity.hasWindowFocus())return false;
+        try{
+            Uri data=Uri.parse("googleapp://lens").buildUpon()
+                    .appendQueryParameter("LensBitmapUriKey",uri.toString())
+                    .appendQueryParameter("AccountNameUriKey","")
+                    .appendQueryParameter("IncognitoUriKey","false")
+                    .appendQueryParameter("ActivityLaunchTimestampNanos",
+                            Long.toString(android.os.SystemClock.elapsedRealtimeNanos()))
+                    .build();
+            android.content.Intent intent=new android.content.Intent(android.content.Intent.ACTION_VIEW,data)
+                    .setPackage("com.google.android.googlequicksearchbox")
+                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.setClipData(android.content.ClipData.newRawUri("Image",uri));
+            activity.startActivity(intent);
+            XposedBridge.log("Clipboard image: verified Google Lens intent requested");
+            return true;
+        }catch(Throwable failure){XposedBridge.log("Clipboard image: Lens intent unavailable",failure);return false;}
+    }
+
     private ClipboardImageSupport(){}
 }

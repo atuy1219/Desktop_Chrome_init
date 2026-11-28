@@ -20,6 +20,7 @@ final class ExtraUiCompatibility {
     static volatile String mostVisitedClass;
     static volatile String profileClass;
     static volatile String[] lensSymbols;
+    static volatile boolean lensIntentProtocol;
 
     static synchronized void start(Context app, ClassLoader loader, ApplicationInfo info) {
         if (started || app == null || loader == null || info == null) return;
@@ -32,24 +33,26 @@ final class ExtraUiCompatibility {
                     "isDevToolsAvailable", "org.chromium.ui.base.DeviceFormFactor",
                     "isNonMultiDisplayContextOnTablet"});
         } catch (Throwable failure) { XposedBridge.log("DevTools named gate unavailable", failure); }
+        MostVisitedFallback.installNamedCapture(loader);
         SharedPreferences cache = app.getSharedPreferences("chromemobilecompat_extra_ui", 0);
         long version;
         try { version = app.getPackageManager().getPackageInfo(app.getPackageName(), 0).getLongVersionCode(); }
         catch (Throwable failure) { version = -1; }
         final long installedVersion = version;
         if (version >= 0 && cache.getLong("version", -2) == version
-                && cache.getInt("schema", 0) == 3) {
-            String[] data = new String[14];
+                && cache.getInt("schema", 0) == 4) {
+            String[] data = new String[19];
             for (int i=0;i<data.length;i++) data[i] = cache.getString("symbol"+i,null);
             apply(loader, data);
             // Missing results are not a permanent cache hit.
-            if (installed && mostVisitedClass != null && lensSymbols != null) return;
+            if (installed && (mostVisitedClass != null || MostVisitedFallback.captureReady())
+                    && (lensSymbols != null || lensIntentProtocol)) return;
         }
         new Thread(() -> {
             try {
                 String[] data = ChromeDexResolver.resolveAdditionalUi(info);
                 SharedPreferences.Editor edit = cache.edit().putLong("version", installedVersion)
-                        .putInt("schema", 3);
+                        .putInt("schema", 4);
                 for (int i=0;i<data.length;i++) edit.putString("symbol"+i,data[i]);
                 edit.apply();
                 new Handler(Looper.getMainLooper()).post(() -> apply(loader, data));
@@ -61,6 +64,8 @@ final class ExtraUiCompatibility {
         mostVisitedClass = data[0];
         profileClass = data[1];
         lensSymbols = data[6] == null ? null : java.util.Arrays.copyOfRange(data,6,12);
+        lensIntentProtocol = "true".equals(data[18]);
+        if(data[14]!=null) MostVisitedFallback.installCapture(loader,data[14],data[15],data[16],data[17]);
         if (!installed && data[2] != null) {
             try { installDevTools(loader, new String[]{data[2], data[3], data[4], data[5]}); }
             catch (Throwable e) { XposedBridge.log("DevTools gate hook unavailable", e); }
@@ -86,7 +91,9 @@ final class ExtraUiCompatibility {
             }catch(Throwable failure){XposedBridge.log("DevTools frontend hook unavailable",failure);}
         }
         XposedBridge.log("Extra UI discovery: mostVisited=" + (mostVisitedClass != null)
-                + " devToolsGate=" + installed + " lens=" + (lensSymbols != null));
+                + " devToolsGate=" + installed + " lens=" + (lensSymbols != null)
+                + " mostVisitedCallback=" + MostVisitedFallback.captureReady()
+                + " lensIntent=" + lensIntentProtocol);
         CurrentPageCardFix.refreshAfterFaviconResolved();
     }
 
