@@ -201,16 +201,30 @@ final class NativeClipboardSuggestion {
             eye.setContentDescription(ja ? "クリップボードの内容を非表示" : "Conceal clipboard contents");
         });
         row.setClickable(true);
-        row.setOnClickListener(v -> {
-            if (!(urlBar instanceof EditText) || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
+        View.OnClickListener select = v -> {
+            if(image) XposedBridge.log("Clipboard image: candidate tapped");
+            if (!urlBar.hasFocus() || !activity.hasWindowFocus()) {
+                if(image) XposedBridge.log("Clipboard image: selection rejected (focus)");
+                return;
+            }
             Item current = read(manager);
             if (current == null || current.timestamp != stamp || current.url != url
-                    || (current.image!=null)!=image) return;
+                    || (current.image!=null)!=image) {
+                if(image) {
+                    XposedBridge.log("Clipboard image: selection rejected (clip replaced or expired)");
+                    android.widget.Toast.makeText(activity,"画像をもう一度コピーしてください",android.widget.Toast.LENGTH_SHORT).show();
+                }
+                return;
+            }
             if(image){ClipboardImageSupport.search(activity,current.image);return;}
+            if(!(urlBar instanceof EditText))return;
             EditText edit = (EditText) urlBar;
             edit.setText(current.text);
             edit.setSelection(edit.length());
-        });
+        };
+        row.setOnClickListener(select);
+        leading.setOnClickListener(select);
+        lines.setOnClickListener(select);
         // Expire revealed text and hide the entire stale row without retaining
         // clipboard content in module fields or preferences.
         row.postDelayed(() -> {
