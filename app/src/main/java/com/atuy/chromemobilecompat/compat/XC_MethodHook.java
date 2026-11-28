@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit.compat;
+package com.atuy.chromemobilecompat.compat;
 
 import java.lang.reflect.Executable;
 

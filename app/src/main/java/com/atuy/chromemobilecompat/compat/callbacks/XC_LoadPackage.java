@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit.compat.callbacks;
+package com.atuy.chromemobilecompat.compat.callbacks;
 
 import android.content.pm.ApplicationInfo;
 

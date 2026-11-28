@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit.compat;
+package com.atuy.chromemobilecompat.compat;
 
 import android.util.Log;
 
@@ -15,7 +15,7 @@ import io.github.libxposed.api.XposedModule;
  * No de.robv.android.xposed classes are referenced or packaged.
  */
 public final class XposedBridge {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static volatile XposedModule module;
 
     private XposedBridge() {}
@@ -81,10 +81,15 @@ public final class XposedBridge {
     public static void log(String message) {
         XposedModule current = module;
         if (current != null) {
-            current.log(Log.INFO, TAG, message);
+            current.log(Log.INFO, null, message);
         } else {
             Log.i(TAG, message);
         }
+    }
+
+    // Fallback diagnostics must not log page or clipboard content from exceptions.
+    public static void log(String message, Throwable failure) {
+        log(message + " (" + failure.getClass().getSimpleName() + ")");
     }
 
     private static XposedModule requireModule() {

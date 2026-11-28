@@ -3,15 +3,16 @@ plugins {
 }
 
 android {
-    namespace = "com.atuy.desktopchromeinit"
+    namespace = "com.atuy.chromemobilecompat"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.atuy.desktopchromeinit"
+        applicationId = "com.atuy.chromemobilecompat"
         minSdk = 29
         targetSdk = 35
-        versionCode = 34
-        versionName = "0.4.15"
+        versionCode = 44
+        versionName = "0.5.9-native-action-size"
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {
@@ -28,6 +29,10 @@ android {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("ci")
         }
+    }
+
+    externalNativeBuild {
+        cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
 
     compileOptions {

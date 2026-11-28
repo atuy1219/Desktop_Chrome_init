@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.content.pm.ApplicationInfo;
 
@@ -443,7 +443,9 @@ final class ChromeDexResolver {
         }
 
         short[] insns = dex.readCodeUnits(method.codeOffset);
-        for (int i = 0; i < insns.length; i++) {
+        for (int i = 0; i < insns.length;) {
+            int width = instructionWidth(insns, i);
+            if (width <= 0 || i + width > insns.length) break;
             int opcode = insns[i] & 0xff;
 
             // const-string vAA, string@BBBB
@@ -467,6 +469,7 @@ final class ChromeDexResolver {
                     return true;
                 }
             }
+            i += width;
         }
         return false;
     }
@@ -1451,6 +1454,306 @@ final class ChromeDexResolver {
         public String toString() {
             return source;
         }
+    }
+
+
+    /** Source-derived pair: edit-card eligibility and its desktop capability check. */
+    static final class OmniboxSymbols {
+        final String processorClass, processorMethod, matchClass;
+        final String capabilityClass, capabilityMethod;
+        OmniboxSymbols(String processorClass, String processorMethod, String matchClass,
+                String capabilityClass, String capabilityMethod) {
+            this.processorClass = processorClass;
+            this.processorMethod = processorMethod;
+            this.matchClass = matchClass;
+            this.capabilityClass = capabilityClass;
+            this.capabilityMethod = capabilityMethod;
+        }
+    }
+
+    static OmniboxSymbols resolveOmnibox(ApplicationInfo info) throws IOException {
+        List<DexFile> files = loadApplicationDexFiles(info);
+        Map<String, DexFile> owners = new HashMap<>();
+        for (DexFile dex : files) {
+            for (String owner : dex.classes.keySet()) owners.put(owner, dex);
+        }
+        OmniboxSymbols found = null;
+        for (DexFile dex : files) {
+            // Skip DEX files that do not contain the source's metric anchor.
+            if (!Arrays.asList(dex.strings).contains("Omnibox.EditUrlSuggestion.Tap")) continue;
+            for (ClassDef owner : dex.classes.values()) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                boolean tap = false, action = false;
+                for (MethodDef method : methods) {
+                    tap |= methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Tap");
+                    action |= methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Copy")
+                            || methodReferencesString(dex, method, "Omnibox.EditUrlSuggestion.Edit");
+                    if (tap && action) break;
+                }
+                if (!tap || !action) continue;
+                for (MethodDef method : methods) {
+                    if ((method.accessFlags & ACC_STATIC) != 0 || method.codeOffset == 0) continue;
+                    MethodId id = dex.methods[method.methodIndex];
+                    Proto proto = dex.protos[id.protoIndex];
+                    String[] p = proto.parameterDescriptors;
+                    if (!BOOLEAN.equals(proto.returnDescriptor) || p.length != 2
+                            || !isObjectDescriptor(p[0]) || !INT.equals(p[1])) continue;
+                    // AutocompleteMatch is a JNI-backed class. Require its original
+                    // descriptor when available, otherwise refuse a different named type.
+                    if (owners.containsKey("Lorg/chromium/components/omnibox/AutocompleteMatch;")
+                            && !p[0].equals("Lorg/chromium/components/omnibox/AutocompleteMatch;")) continue;
+                    MethodId capability = null;
+                    short[] code = dex.readCodeUnits(method.codeOffset);
+                    for (int i = 0; i < code.length;) {
+                        int op = code[i] & 0xff;
+                        int width = instructionWidth(code, i);
+                        if (width <= 0 || i + width > code.length) break;
+                        if ((op == 0x71 || op == 0x77) && width == 3) {
+                            int index = code[i + 1] & 0xffff;
+                            if (index < dex.methods.length) {
+                                MethodId candidate = dex.methods[index];
+                                Proto cp = dex.protos[candidate.protoIndex];
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && Arrays.equals(cp.parameterDescriptors,
+                                                new String[]{"Landroid/content/Context;"})
+                                        && owners.containsKey(candidate.ownerDescriptor)) {
+                                    if (capability != null && capability != candidate) {
+                                        capability = null;
+                                        break;
+                                    }
+                                    capability = candidate;
+                                }
+                            }
+                        }
+                        i += width;
+                    }
+                    if (capability == null) continue;
+                    OmniboxSymbols next = new OmniboxSymbols(
+                            descriptorToClassName(owner.descriptor), id.name,
+                            descriptorToClassName(p[0]),
+                            descriptorToClassName(capability.ownerDescriptor), capability.name);
+                    if (found != null) throw new IOException("Ambiguous Omnibox processor/capability");
+                    found = next;
+                }
+            }
+        }
+        if (found == null) throw new IOException("Omnibox source anchors not uniquely resolved (possibly inlined)");
+        return found;
+    }
+
+    // DEX instruction widths in 16-bit code units. Do not mistake an operand
+    // or switch/array payload for an invoke-static opcode.
+    private static int instructionWidth(short[] code, int i) {
+        int unit = code[i] & 0xffff, op = unit & 0xff;
+        if (op == 0 && unit != 0) {
+            if (i + 1 >= code.length) return 0;
+            int count = code[i + 1] & 0xffff;
+            if (unit == 0x0100) return 4 + count * 2;
+            if (unit == 0x0200) return 2 + count * 4;
+            if (unit == 0x0300 && i + 3 < code.length) {
+                long size = (code[i + 2] & 0xffffL) | ((code[i + 3] & 0xffffL) << 16);
+                long width = 4 + (count * size + 1) / 2;
+                return width > Integer.MAX_VALUE ? 0 : (int) width;
+            }
+            return 0;
+        }
+        if (op == 0x18) return 5;
+        if (op == 0xfa || op == 0xfb) return 4;
+        if (op == 0x03 || op == 0x06 || op == 0x09 || op == 0x14 || op == 0x17
+                || op == 0x1b || op == 0x24 || op == 0x25 || op == 0x26
+                || op == 0x2a || op == 0x2b || op == 0x2c
+                || (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)
+                || op == 0xfc || op == 0xfd) return 3;
+        if (op == 0x02 || op == 0x05 || op == 0x08 || op == 0x13 || op == 0x15
+                || op == 0x16 || op == 0x19 || op == 0x1a || op == 0x1c
+                || op == 0x1f || op == 0x20 || op == 0x22 || op == 0x23
+                || op == 0x29 || (op >= 0x2d && op <= 0x3d)
+                || (op >= 0x44 && op <= 0x6d) || (op >= 0x90 && op <= 0xaf)
+                || (op >= 0xd0 && op <= 0xe2) || op == 0xfe || op == 0xff) return 2;
+        if (op == 0x00 || op == 0x01 || op == 0x04 || op == 0x07
+                || (op >= 0x0a && op <= 0x12) || op == 0x1d || op == 0x1e
+                || op == 0x21 || op == 0x27 || op == 0x28
+                || (op >= 0x7b && op <= 0x8f) || (op >= 0xb0 && op <= 0xcf)) return 1;
+        return 0;
+    }
+
+    /**
+     * Locates Chromium TabFavicon's R8-obfuscated static bitmap accessor.
+     * The upstream class defines BOTH Bitmap(Tab) and Bitmap(Tab, boolean).
+     * Find an exact matching *pair* by DEX method signatures, not names;
+     * reject ambiguous pairs rather than invoking an unrelated function.
+     *
+     * Called on a worker only after the installed Chrome package version
+     * changes. Return [ownerClass, methodName, tabParameterDescriptor].
+     */
+    static String[] findFaviconAccessor(ApplicationInfo appInfo) throws IOException {
+        List<DexFile> dexes = loadApplicationDexFiles(appInfo);
+        ArrayList<String[]> exact = new ArrayList<>();
+        ArrayList<String[]> named = new ArrayList<>();
+        for (DexFile dex : dexes) {
+            for (ClassDef owner : dex.classes.values()) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                // TabFavicon has JNI entry points: static Bitmap(Tab,boolean),
+                // static TabFavicon(Tab), and static void(Tab,Bitmap,GURL).
+                // Tie all three to the same descriptor, even if Tab is renamed.
+                for (MethodDef def : methods) {
+                    if ((def.accessFlags & ACC_STATIC) == 0) continue;
+                    MethodId id = dex.methods[def.methodIndex];
+                    Proto proto = dex.protos[id.protoIndex];
+                    String[] p = proto.parameterDescriptors;
+                    if (!"Landroid/graphics/Bitmap;".equals(proto.returnDescriptor)
+                            || p.length != 2 || !BOOLEAN.equals(p[1])
+                            || !isObjectDescriptor(p[0])) continue;
+                    String tab = p[0];
+                    String from = null, async = null;
+                    int creators = 0, ownerGetters = 0, callbacks = 0, requests = 0;
+                    for (MethodDef other : methods) {
+                        MethodId m = dex.methods[other.methodIndex];
+                        Proto op = dex.protos[m.protoIndex];
+                        String[] q = op.parameterDescriptors;
+                        if ((other.accessFlags & ACC_STATIC) != 0) {
+                            if (q.length == 1 && tab.equals(q[0])
+                                    && owner.descriptor.equals(op.returnDescriptor)) {
+                                ownerGetters++;
+                                // TabFavicon.get(Tab) has the same signature.
+                                // Only from(Tab) constructs its own user-data object.
+                                if ("from".equals(m.name)
+                                        || constructsOwner(dex, other, owner.descriptor)) {
+                                    from = m.name;
+                                    creators++;
+                                }
+                            }
+                            if ("V".equals(op.returnDescriptor) && q.length == 3
+                                    && tab.equals(q[0])
+                                    && "Landroid/graphics/Bitmap;".equals(q[1])
+                                    && "Lorg/chromium/url/GURL;".equals(q[2])) callbacks++;
+                        } else if (q.length == 0 && isObjectDescriptor(op.returnDescriptor)
+                                && (op.returnDescriptor.equals("Lorg/chromium/base/Promise;")
+                                    || methodReferencesString(dex, other, "Not eligible for favicon"))) {
+                            async = m.name;
+                            requests++;
+                        }
+                    }
+                    String[] candidate = {descriptorToClassName(owner.descriptor), id.name,
+                            tab, creators == 1 ? from : null, requests == 1 ? async : null};
+                    if (ownerGetters >= 1 && callbacks == 1) exact.add(candidate);
+                    else if (tab.endsWith("/tab/Tab;") && creators == 1) named.add(candidate);
+                }
+            }
+        }
+        String[] selected = exact.size() == 1 ? exact.get(0)
+                : exact.isEmpty() && named.size() == 1 ? named.get(0) : null;
+        // Independent native local DB path. Resolve a named helper or a
+        // call site in TabFavicon's verified async method; never guess between
+        // the identical local and foreign favicon signatures.
+        String[] local = findLocalFavicon(dexes, selected);
+        if (selected == null && local == null) {
+            throw new IOException("TabFavicon candidates exact=" + exact.size()
+                    + " named=" + named.size() + "; local helper unresolved");
+        }
+        String[] result = selected == null ? new String[8] : Arrays.copyOf(selected, 8);
+        if (local != null) System.arraycopy(local, 0, result, 5, 3);
+        return result;
+    }
+
+    private static boolean localFaviconShape(Proto p) {
+        String[] a = p.parameterDescriptors;
+        return BOOLEAN.equals(p.returnDescriptor) && a.length == 5
+                && isObjectDescriptor(a[0]) && "Lorg/chromium/url/GURL;".equals(a[1])
+                && INT.equals(a[2]) && BOOLEAN.equals(a[3]) && isObjectDescriptor(a[4]);
+    }
+
+    private static String[] findLocalFavicon(List<DexFile> dexes, String[] selected) {
+        final String namedOwner = "Lorg/chromium/chrome/browser/ui/favicon/FaviconHelper;";
+        ArrayList<String[]> candidates = new ArrayList<>();
+        for (DexFile dex : dexes) {
+            ClassDef owner = dex.classes.get(namedOwner);
+            if (owner == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(owner)) {
+                MethodId m = dex.methods[def.methodIndex];
+                if ("getLocalFaviconImageForURL".equals(m.name)
+                        && (def.accessFlags & ACC_STATIC) == 0
+                        && localFaviconShape(dex.protos[m.protoIndex])) {
+                    String[] entry = localEntry(dex, owner, m.name);
+                    if (entry != null) candidates.add(entry);
+                }
+            }
+        }
+        if (candidates.size() == 1) return candidates.get(0);
+        if (selected == null || selected[0] == null || selected[4] == null) return null;
+        String desc = "L" + selected[0].replace('.', '/') + ";";
+        for (DexFile dex : dexes) {
+            ClassDef caller = dex.classes.get(desc);
+            if (caller == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(caller)) {
+                MethodId m = dex.methods[def.methodIndex];
+                if (!selected[4].equals(m.name) || def.codeOffset == 0) continue;
+                short[] code = dex.readCodeUnits(def.codeOffset);
+                for (int i = 0; i < code.length;) {
+                    int width = instructionWidth(code, i);
+                    if (width <= 0 || i + width > code.length) break;
+                    int op = code[i] & 0xff;
+                    if (op == 0x6e || op == 0x74) {
+                        int mi = code[i + 1] & 0xffff;
+                        if (mi < dex.methods.length) {
+                            MethodId called = dex.methods[mi];
+                            if (localFaviconShape(dex.protos[called.protoIndex])) {
+                                for (DexFile targetDex : dexes) {
+                                    ClassDef target = targetDex.classes.get(called.ownerDescriptor);
+                                    if (target == null) continue;
+                                    String[] entry = localEntry(targetDex, target, called.name);
+                                    if (entry != null && candidates.stream().noneMatch(
+                                            old -> Arrays.equals(old, entry))) candidates.add(entry);
+                                }
+                            }
+                        }
+                    }
+                    i += width;
+                }
+            }
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    private static String[] localEntry(DexFile dex, ClassDef owner, String method) {
+        int constructors = 0, destroyCount = 0, requests = 0;
+        String destroy = null, namedDestroy = null;
+        for (MethodDef def : dex.getDefinedMethods(owner)) {
+            if ((def.accessFlags & ACC_STATIC) != 0) continue;
+            MethodId m = dex.methods[def.methodIndex];
+            Proto p = dex.protos[m.protoIndex];
+            if (m.name.equals(method) && localFaviconShape(p)) requests++;
+            if ("V".equals(p.returnDescriptor) && p.parameterDescriptors.length == 0) {
+                if ("<init>".equals(m.name)) constructors++;
+                else {
+                    destroy = m.name;
+                    destroyCount++;
+                    if ("destroy".equals(m.name)) namedDestroy = m.name;
+                }
+            }
+        }
+        if (constructors != 1 || requests != 1) return null;
+        boolean nativePtr = false;
+        for (FieldId f : dex.getDefinedFields(owner)) if ("J".equals(f.typeDescriptor)) nativePtr = true;
+        if (!nativePtr) return null;
+        String cleanup = namedDestroy != null ? namedDestroy : destroyCount == 1 ? destroy : null;
+        return cleanup == null ? null : new String[]{descriptorToClassName(owner.descriptor),
+                method, cleanup};
+    }
+
+    private static boolean constructsOwner(DexFile dex, MethodDef method, String owner) {
+        if (method.codeOffset == 0) return false;
+        short[] code = dex.readCodeUnits(method.codeOffset);
+        for (int i = 0; i < code.length;) {
+            int width = instructionWidth(code, i);
+            if (width <= 0 || i + width > code.length) break;
+            if ((code[i] & 0xff) == 0x22 && width == 2) {
+                int index = code[i + 1] & 0xffff;
+                if (index < dex.types.length && owner.equals(dex.types[index])) return true;
+            }
+            i += width;
+        }
+        return false;
     }
 
     private ChromeDexResolver() {}

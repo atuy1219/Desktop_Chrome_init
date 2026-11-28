@@ -1,4 +1,4 @@
-package com.atuy.desktopchromeinit;
+package com.atuy.chromemobilecompat;
 
 import android.app.Application;
 import android.content.pm.ApplicationInfo;
@@ -6,8 +6,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import com.atuy.desktopchromeinit.compat.XposedBridge;
-import com.atuy.desktopchromeinit.compat.callbacks.XC_LoadPackage;
+import com.atuy.chromemobilecompat.compat.XposedBridge;
+import com.atuy.chromemobilecompat.compat.callbacks.XC_LoadPackage;
 
 import java.lang.reflect.Method;
 
@@ -24,7 +24,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
  * class name is used as a readiness probe.
  */
 public final class ModernEntry extends XposedModule {
-    private static final String TAG = "DesktopChromeInit";
+    private static final String TAG = "ChromeMobileCompat";
     private static final String TARGET_PACKAGE = "com.android.chrome";
     private static final long RETRY_INTERVAL_MS = 250L;
     private static final int MAX_RETRY_COUNT = 240;
@@ -45,6 +45,9 @@ public final class ModernEntry extends XposedModule {
                 + " api=" + getApiVersion());
 
         if (TARGET_PACKAGE.equals(processName)) {
+            try { OmniboxIcons.initialize(getModuleApplicationInfo()); }
+            catch (Throwable t) { e("Omnibox asset initialization failed: " + t.getClass().getSimpleName()); }
+            startNativeProbe("module-loaded");
             scheduleRetry(0L);
         }
     }
@@ -72,7 +75,18 @@ public final class ModernEntry extends XposedModule {
         latestApplicationInfo = param.getApplicationInfo();
         e("onPackageReady loader=" + latestClassLoader
                 + " appInfo=" + (latestApplicationInfo != null));
+        startNativeProbe("package-ready");
         tryInstall("onPackageReady");
+    }
+
+    private void startNativeProbe(String phase) {
+        try {
+            // libxposed API 102 provides the real module APK and native paths.
+            // No package-visibility lookup or classloader string guessing.
+            ChromeNativeProbe.start(getModuleApplicationInfo(), phase);
+        } catch (Throwable t) {
+            e("NATIVE_PROBE bootstrap unavailable: " + t.getClass().getSimpleName());
+        }
     }
 
     private boolean isTarget(String packageName, boolean firstPackage) {
@@ -157,7 +171,7 @@ public final class ModernEntry extends XposedModule {
             }
         } catch (Throwable t) {
             d(phase + ": hook installation threw " + t);
-            log(Log.ERROR, TAG, phase + ": hook installation failed", t);
+            log(Log.ERROR, null, phase + ": hook installation failed", t);
             scheduleRetry(RETRY_INTERVAL_MS);
         }
     }
@@ -221,7 +235,7 @@ public final class ModernEntry extends XposedModule {
     private void d(String message) {
         Log.i(TAG, message);
         try {
-            log(Log.INFO, TAG, message);
+            log(Log.INFO, null, message);
         } catch (Throwable ignored) {
         }
     }
@@ -229,7 +243,7 @@ public final class ModernEntry extends XposedModule {
     private void e(String message) {
         Log.e(TAG, message);
         try {
-            log(Log.ERROR, TAG, message);
+            log(Log.ERROR, null, message);
         } catch (Throwable ignored) {
         }
     }
