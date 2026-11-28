@@ -1806,37 +1806,58 @@ final class ChromeDexResolver {
                             iconCallback = true;
                     }
                     boolean gateOnly = Arrays.equals(a,new String[]{contextType});
-                    boolean allowedGate = a.length == 3 && contextType.equals(a[0])
-                            && isObjectDescriptor(a[1]) && isObjectDescriptor(a[2]);
+                    boolean allowedGate = a.length == 3
+                            && (contextType.equals(a[0]) || "Landroid/app/Activity;".equals(a[0]))
+                            && "Lorg/chromium/chrome/browser/profiles/Profile;".equals(a[1])
+                            && "Lorg/chromium/content_public/browser/WebContents;".equals(a[2]);
                     if (!hasFeature || !isStatic || !BOOLEAN.equals(p.returnDescriptor)
                             || (!gateOnly && !allowedGate)
                             || def.codeOffset == 0
                             || !methodReferencesString(dex, def, "AndroidDevToolsFrontend")) continue;
                     short[] code = dex.readCodeUnits(def.codeOffset);
                     ArrayList<MethodId> candidates = new ArrayList<>();
+                    ArrayList<MethodId> features = new ArrayList<>();
+                    boolean nativePolicyCall = false;
                     for (int i = 0; i < code.length;) {
                         int width = instructionWidth(code, i);
                         if (width <= 0 || i + width > code.length) break;
                         int op = code[i] & 0xff;
-                        if (op == 0x71 || op == 0x77) {
+                        if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
                             int mi = code[i + 1] & 0xffff;
                             if (mi < dex.methods.length) {
                                 MethodId called = dex.methods[mi];
                                 Proto cp = dex.protos[called.protoIndex];
                                 if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && (op == 0x71 || op == 0x77)
                                         && Arrays.equals(cp.parameterDescriptors,new String[]{contextType})
                                         && !called.ownerDescriptor.equals(owner.descriptor)) {
                                     candidates.add(called);
                                 }
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && Arrays.equals(cp.parameterDescriptors,new String[]{"Ljava/lang/String;"}))
+                                    features.add(called);
+                                // R8 can inline the JNI adapter into the Java gate.
+                                // The shared JNI dispatch remains a boolean call with
+                                // the profile/web contents object arguments.
+                                if (BOOLEAN.equals(cp.returnDescriptor) &&
+                                        (Arrays.equals(cp.parameterDescriptors,new String[]{INT,
+                                                "Ljava/lang/Object;","Ljava/lang/Object;"})
+                                        || Arrays.equals(cp.parameterDescriptors,new String[]{
+                                                "Lorg/chromium/chrome/browser/profiles/Profile;",
+                                                "Lorg/chromium/content_public/browser/WebContents;"})))
+                                    nativePolicyCall = true;
                             }
                         }
                         i += width;
                     }
-                    if (candidates.size() == 1) {
+                    if (candidates.size() == 1 && (!allowedGate || nativePolicyCall)) {
                         MethodId tablet = candidates.get(0);
+                        MethodId feature = features.size() == 1 ? features.get(0) : null;
                         (gateOnly ? dev : allowedDev).add(new String[]{
                                 descriptorToClassName(owner.descriptor), id.name,
-                                descriptorToClassName(tablet.ownerDescriptor), tablet.name});
+                                descriptorToClassName(tablet.ownerDescriptor), tablet.name,
+                                feature == null ? null : descriptorToClassName(feature.ownerDescriptor),
+                                feature == null ? null : feature.name});
                     }
                 }
                 if (singletonCount == 1 && launchCount == 1) {
@@ -1878,17 +1899,25 @@ final class ChromeDexResolver {
                 }
             }
         }
-        String[] result = new String[12];
+        String[] result = new String[14];
         if (mv.size() == 1) System.arraycopy(mv.get(0), 0, result, 0, 2);
-        if (dev.size() == 1) System.arraycopy(dev.get(0), 0, result, 2, 4);
-        else if (dev.isEmpty() && allowedDev.size() == 1)
-            System.arraycopy(allowedDev.get(0),0,result,2,4);
+        String[] gate = allowedDev.size() == 1 ? allowedDev.get(0)
+                : dev.size() == 1 ? dev.get(0) : null;
+        if (gate != null) {
+            System.arraycopy(gate,0,result,2,4);
+            System.arraycopy(gate,4,result,12,2);
+        }
         ArrayList<String[]> lens = new ArrayList<>();
         for (String[] c : controllers) for (String[] b : builders) {
             if (c[3].equals(b[3]))
                 lens.add(new String[]{c[0],c[1],c[2],b[0],b[1],b[2]});
         }
         if (lens.size() == 1) System.arraycopy(lens.get(0),0,result,6,6);
+        com.atuy.chromemobilecompat.compat.XposedBridge.log(
+                "Extra UI resolver: dex=" + files.size() + " mostVisitedCandidates=" + mv.size()
+                + " devAvailableCandidates=" + dev.size() + " devPolicyCandidates=" + allowedDev.size()
+                + " lensControllers=" + controllers.size() + " lensBuilders=" + builders.size()
+                + " lensPairs=" + lens.size());
         return result;
     }
 
