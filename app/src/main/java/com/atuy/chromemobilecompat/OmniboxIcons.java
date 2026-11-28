@@ -41,10 +41,7 @@ final class OmniboxIcons {
 
     static void action(ImageView view, String name, int tint) {
         Context context = view.getContext();
-        int size = Math.max(1, NativeOmniboxPageCard.dimension(
-                context, "omnibox_suggestion_icon_small_size", 20));
-        int max = Math.round(32 * context.getResources().getDisplayMetrics().density);
-        if (size > max) size = Math.round(20 * context.getResources().getDisplayMetrics().density);
+        int size = actionIconSize(context);
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         bitmap.setDensity(context.getResources().getDisplayMetrics().densityDpi);
         Canvas canvas = new Canvas(bitmap);
@@ -70,10 +67,23 @@ final class OmniboxIcons {
         }
         view.setImageBitmap(bitmap);
         view.setImageTintList(ColorStateList.valueOf(tint));
-        view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        // Chromium ActionButtonView centers the intrinsic 24dp drawable.
+        // Do not constrain it again using the old 20dp content padding.
+        view.setPadding(0, 0, 0, 0);
+        view.setAdjustViewBounds(false);
+        view.setScaleType(ImageView.ScaleType.CENTER);
         if (REPORTED.add(name)) XposedBridge.log("Omnibox icon " + name
                 + " source=" + source
                 + " sizePx=" + size);
+    }
+
+    static int actionIconSize(Context context) {
+        // EditUrlSuggestionProcessor uses forSmallIcon; on mobile Chrome
+        // OmniboxResourceProvider selects omnibox_suggestion_24dp_icon_size.
+        int expected = Math.round(24 * context.getResources().getDisplayMetrics().density);
+        int size = NativeOmniboxPageCard.dimension(context,
+                "omnibox_suggestion_24dp_icon_size", 24);
+        return Math.max(1, size == expected ? size : expected);
     }
 
     private static Bitmap bundledShare(boolean rtl) {

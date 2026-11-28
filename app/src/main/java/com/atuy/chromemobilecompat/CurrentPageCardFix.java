@@ -475,8 +475,8 @@ final class CurrentPageCardFix {
         }
         ImageView icon = new ImageView(activity);
         OmniboxIcons.action(icon, chromeDrawable, tint);
-        button.addView(icon, new LinearLayout.LayoutParams(
-                dp(activity, 20), dp(activity, 20)));
+        int iconSize = OmniboxIcons.actionIconSize(activity);
+        button.addView(icon, new LinearLayout.LayoutParams(iconSize, iconSize));
         TextView label = new TextView(activity);
         label.setText(ja ? japanese : english);
         label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);

@@ -2,6 +2,12 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## 0.5.9-native-action-size (test only)
+
+- Restore share/copy/edit artwork to mobile Chromium's intrinsic 24dp edge, centered without additional padding in the existing 48dp action columns. Applies to the native action path, overlay path and legacy card fallback.
+- Source: Chromium 159 EditUrlSuggestionProcessor (forSmallIcon), ActionButtonView (ScaleType.CENTER), BaseSuggestionViewBinder (direct drawable binding), OmniboxResourceProvider and res/values/dimens.xml (24dp icon, 48dp action column).
+- No changes to favicon retrieval, clipboard candidates, action handlers, or extension hooks. Real-device verification required.
+
 ## 0.5.8-clipboard-text (test only)
 
 - Share PNGs are now committed as exact upstream blobs; CI verifies them offline to avoid GitHub HTTP 429 failures.

@@ -377,12 +377,8 @@ final class NativeOmniboxPageCard {
             if (button == null) button = new ImageView(activity);
             button.setClickable(true);
             button.setFocusable(true);
-            // Android ImageView.CENTER draws the full 24dp vector, which is
-            // visibly larger than Chrome's 20dp Omnibox small-icon policy.
-            // Keep a 48dp touch target but constrain the drawable area.
-            button.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-            int inset = Math.max(0, (actionWidth - dp(activity, 20)) / 2);
-            button.setPadding(inset, inset, inset, inset);
+            // ActionButtonView uses CENTER and no extra icon padding.
+            // Keep the native 48dp action column; OmniboxIcons binds 24dp art.
             if (foreground != 0) {
                 button.setForeground(activity.getDrawable(foreground));
             }
