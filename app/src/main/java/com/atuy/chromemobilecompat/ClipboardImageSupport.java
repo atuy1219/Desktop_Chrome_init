@@ -32,16 +32,29 @@ final class ClipboardImageSupport {
     static void search(Activity activity,Uri uri) {
         try{
             ClassLoader loader=activity.getClassLoader();
-            Class<?> controller=Class.forName("org.chromium.chrome.browser.lens.LensController",false,loader);
-            Class<?> params=Class.forName("org.chromium.chrome.browser.lens.LensIntentParams",false,loader);
-            Class<?> builder=Class.forName("org.chromium.chrome.browser.lens.LensIntentParams$Builder",false,loader);
+            String[] symbols=ExtraUiCompatibility.lensSymbols;
+            if(symbols==null)symbols=new String[]{
+                    "org.chromium.chrome.browser.lens.LensController","getInstance","startLens",
+                    "org.chromium.chrome.browser.lens.LensIntentParams$Builder","withImageUri","build"};
+            Class<?> controller=Class.forName(symbols[0],false,loader);
+            Class<?> builder=Class.forName(symbols[3],false,loader);
+            java.lang.reflect.Constructor<?> ctor=builder.getDeclaredConstructor(int.class,boolean.class);
+            Method withImage=builder.getDeclaredMethod(symbols[4],Uri.class);
+            Method build=builder.getDeclaredMethod(symbols[5]);
+            Method get=controller.getDeclaredMethod(symbols[1]);
+            Method launch=controller.getDeclaredMethod(symbols[2],Context.class,build.getReturnType());
+            if(withImage.getReturnType()!=builder || get.getReturnType()!=controller
+                    || !java.lang.reflect.Modifier.isStatic(get.getModifiers())
+                    || launch.getReturnType()!=void.class || build.getReturnType().isPrimitive())
+                throw new IllegalStateException("Lens signature mismatch");
+            ctor.setAccessible(true);withImage.setAccessible(true);build.setAccessible(true);
+            get.setAccessible(true);launch.setAccessible(true);
             // Source enum CONTEXT_MENU_SEARCH_MENU_ITEM = 0; no native
             // clipboard Lens entry point. Use Chrome's existing image query.
-            Object b=builder.getConstructor(int.class,boolean.class).newInstance(0,false);
-            builder.getMethod("withImageUri",Uri.class).invoke(b,uri);
-            Object p=builder.getMethod("build").invoke(b);
-            Object instance=controller.getMethod("getInstance").invoke(null);
-            Method launch=controller.getMethod("startLens",Context.class,params);
+            Object b=ctor.newInstance(0,false);
+            Object configured=withImage.invoke(b,uri);
+            Object p=build.invoke(configured);
+            Object instance=get.invoke(null);
             launch.invoke(instance,activity,p);
             XposedBridge.log("Clipboard image: Chrome Lens requested");
         }catch(Throwable error){

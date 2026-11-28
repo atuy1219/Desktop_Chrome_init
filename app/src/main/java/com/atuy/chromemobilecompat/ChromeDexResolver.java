@@ -1763,16 +1763,39 @@ final class ChromeDexResolver {
         List<DexFile> files = loadApplicationDexFiles(info);
         ArrayList<String[]> mv = new ArrayList<>();
         ArrayList<String[]> dev = new ArrayList<>();
+        ArrayList<String[]> allowedDev = new ArrayList<>();
+        ArrayList<String[]> controllers = new ArrayList<>();
+        ArrayList<String[]> builders = new ArrayList<>();
+        final String contextType = "Landroid/content/Context;";
+        final String uriType = "Landroid/net/Uri;";
         for (DexFile dex : files) {
             boolean hasFeature = Arrays.asList(dex.strings).contains("AndroidDevToolsFrontend");
             for (ClassDef owner : dex.classes.values()) {
                 List<MethodDef> methods = dex.getDefinedMethods(owner);
                 boolean siteFactory = false, siteCallback = false, iconCallback = false;
+                String singleton = null, launch = null, lensParams = null;
+                int singletonCount = 0, launchCount = 0;
+                boolean builderConstructor = false;
+                String imageSetter = null;
+                int imageSetterCount = 0;
                 for (MethodDef def : methods) {
                     MethodId id = dex.methods[def.methodIndex];
                     Proto p = dex.protos[id.protoIndex];
                     String[] a = p.parameterDescriptors;
                     boolean isStatic = (def.accessFlags & ACC_STATIC) != 0;
+                    if (isStatic && a.length == 0 && owner.descriptor.equals(p.returnDescriptor)) {
+                        singleton = id.name; singletonCount++;
+                    }
+                    if (!isStatic && VOID.equals(p.returnDescriptor) && a.length == 2
+                            && contextType.equals(a[0]) && isObjectDescriptor(a[1])) {
+                        launch = id.name; lensParams = a[1]; launchCount++;
+                    }
+                    if ("<init>".equals(id.name) && Arrays.equals(a,new String[]{INT,BOOLEAN}))
+                        builderConstructor = true;
+                    if (!isStatic && owner.descriptor.equals(p.returnDescriptor)
+                            && Arrays.equals(a,new String[]{uriType})) {
+                        imageSetter = id.name; imageSetterCount++;
+                    }
                     if (isStatic && isObjectDescriptor(p.returnDescriptor)
                             && Arrays.equals(a, new String[]{"Ljava/lang/String;",
                             "Lorg/chromium/url/GURL;", INT, INT, INT})) siteFactory = true;
@@ -1782,8 +1805,12 @@ final class ChromeDexResolver {
                         if (Arrays.equals(a, new String[]{"Lorg/chromium/url/GURL;"}))
                             iconCallback = true;
                     }
+                    boolean gateOnly = Arrays.equals(a,new String[]{contextType});
+                    boolean allowedGate = a.length == 3 && contextType.equals(a[0])
+                            && isObjectDescriptor(a[1]) && isObjectDescriptor(a[2]);
                     if (!hasFeature || !isStatic || !BOOLEAN.equals(p.returnDescriptor)
-                            || !Arrays.equals(a, new String[]{"Landroid/content/Context;"})
+                            || (!gateOnly && !allowedGate)
+                            || def.codeOffset == 0
                             || !methodReferencesString(dex, def, "AndroidDevToolsFrontend")) continue;
                     short[] code = dex.readCodeUnits(def.codeOffset);
                     ArrayList<MethodId> candidates = new ArrayList<>();
@@ -1797,7 +1824,7 @@ final class ChromeDexResolver {
                                 MethodId called = dex.methods[mi];
                                 Proto cp = dex.protos[called.protoIndex];
                                 if (BOOLEAN.equals(cp.returnDescriptor)
-                                        && Arrays.equals(cp.parameterDescriptors, a)
+                                        && Arrays.equals(cp.parameterDescriptors,new String[]{contextType})
                                         && !called.ownerDescriptor.equals(owner.descriptor)) {
                                     candidates.add(called);
                                 }
@@ -1807,8 +1834,35 @@ final class ChromeDexResolver {
                     }
                     if (candidates.size() == 1) {
                         MethodId tablet = candidates.get(0);
-                        dev.add(new String[]{descriptorToClassName(owner.descriptor), id.name,
+                        (gateOnly ? dev : allowedDev).add(new String[]{
+                                descriptorToClassName(owner.descriptor), id.name,
                                 descriptorToClassName(tablet.ownerDescriptor), tablet.name});
+                    }
+                }
+                if (singletonCount == 1 && launchCount == 1) {
+                    // LensController exposes the same parameter object on the
+                    // WindowAndroid and Context launch overloads.
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ((def.accessFlags & ACC_STATIC) == 0 && VOID.equals(p.returnDescriptor)
+                                && Arrays.equals(p.parameterDescriptors,new String[]{WINDOW_ANDROID,lensParams})) {
+                            controllers.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    singleton, launch, lensParams});
+                            break;
+                        }
+                    }
+                }
+                if (builderConstructor && imageSetterCount == 1) {
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ((def.accessFlags & ACC_STATIC) == 0 && p.parameterDescriptors.length == 0
+                                && isObjectDescriptor(p.returnDescriptor)
+                                && !owner.descriptor.equals(p.returnDescriptor)) {
+                            builders.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    imageSetter,id.name,p.returnDescriptor});
+                        }
                     }
                 }
                 if (siteFactory && siteCallback && iconCallback) {
@@ -1824,9 +1878,17 @@ final class ChromeDexResolver {
                 }
             }
         }
-        String[] result = new String[6];
+        String[] result = new String[12];
         if (mv.size() == 1) System.arraycopy(mv.get(0), 0, result, 0, 2);
         if (dev.size() == 1) System.arraycopy(dev.get(0), 0, result, 2, 4);
+        else if (dev.isEmpty() && allowedDev.size() == 1)
+            System.arraycopy(allowedDev.get(0),0,result,2,4);
+        ArrayList<String[]> lens = new ArrayList<>();
+        for (String[] c : controllers) for (String[] b : builders) {
+            if (c[3].equals(b[3]))
+                lens.add(new String[]{c[0],c[1],c[2],b[0],b[1],b[2]});
+        }
+        if (lens.size() == 1) System.arraycopy(lens.get(0),0,result,6,6);
         return result;
     }
 

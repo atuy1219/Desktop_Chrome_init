@@ -4,9 +4,9 @@ LSPosed compatibility module for using Desktop Chrome on Android phones with mob
 
 ## In-development compatibility fixes (version unchanged)
 
-- Clipboard image candidate: fresh single non-sensitive content URI, hidden initially, bounded background thumbnail decode only on reveal, explicit click requests Chrome's existing Lens entry point. This is not the native ClipboardProvider's default-search-engine POST route; if Lens is not available or R8 inlines its entry, the launch is unavailable. No image contents or URI are persisted or logged.
+- Clipboard image candidate: fresh single non-sensitive content URI, hidden initially, bounded background thumbnail decode only on reveal, explicit click requests Chrome's existing Lens entry point. This is not the native ClipboardProvider's default-search-engine POST route; if Lens is unavailable or R8 eliminates its entry, the launch is unavailable. Source-derived matching of the two Lens launch overloads and URI builder assists R8 discovery. No image contents or URI are persisted or logged.
 - Most visited candidate: Chrome's own MostVisitedSitesBridge for the current confirmed regular profile; horizontal tiles, only local personal TopSites/valid local score, no independent history DB or external lookup. The NTP bridge is not identical to the Omnibox provider's ranking. Source-derived JNI callback shapes assist R8 discovery. Native tile candidate takes precedence. No incognito queries.
-- DevTools: scope the existing tablet predicate to DevToolsWindowAndroid.isDevToolsAvailable, preserving the AndroidDevToolsFrontend feature flag and native policy check. Source name or unambiguous DEX string/call signature. If R8 inlines the gate, fail closed. No global form-factor change.
+- DevTools: scope the existing tablet predicate to DevToolsWindowAndroid.isDevToolsAvailable, preserving the AndroidDevToolsFrontend feature flag and native policy check. Source name or unambiguous DEX string/call signature. If R8 inlines the gate into the native policy wrapper, scope that wrapper; if no unique tablet predicate is recoverable, fail closed. No global form-factor change.
 - Device validation still required; package version unchanged until a release.
 
 ## 0.5.9-native-action-size (test only)

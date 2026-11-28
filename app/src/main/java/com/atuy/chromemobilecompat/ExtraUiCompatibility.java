@@ -16,6 +16,7 @@ final class ExtraUiCompatibility {
     private static boolean started, installed;
     static volatile String mostVisitedClass;
     static volatile String profileClass;
+    static volatile String[] lensSymbols;
 
     static synchronized void start(Context app, ClassLoader loader, ApplicationInfo info) {
         if (started || app == null || loader == null || info == null) return;
@@ -34,8 +35,8 @@ final class ExtraUiCompatibility {
         catch (Throwable failure) { version = -1; }
         final long installedVersion = version;
         if (version >= 0 && cache.getLong("version", -2) == version
-                && cache.getInt("schema", 0) == 1) {
-            String[] data = new String[6];
+                && cache.getInt("schema", 0) == 2) {
+            String[] data = new String[12];
             for (int i=0;i<data.length;i++) data[i] = cache.getString("symbol"+i,null);
             apply(loader, data);
             return;
@@ -44,7 +45,7 @@ final class ExtraUiCompatibility {
             try {
                 String[] data = ChromeDexResolver.resolveAdditionalUi(info);
                 SharedPreferences.Editor edit = cache.edit().putLong("version", installedVersion)
-                        .putInt("schema", 1);
+                        .putInt("schema", 2);
                 for (int i=0;i<data.length;i++) edit.putString("symbol"+i,data[i]);
                 edit.apply();
                 new Handler(Looper.getMainLooper()).post(() -> apply(loader, data));
@@ -55,19 +56,35 @@ final class ExtraUiCompatibility {
     private static void apply(ClassLoader loader, String[] data) {
         mostVisitedClass = data[0];
         profileClass = data[1];
+        lensSymbols = data[6] == null ? null : java.util.Arrays.copyOfRange(data,6,12);
         if (!installed && data[2] != null) {
             try { installDevTools(loader, new String[]{data[2], data[3], data[4], data[5]}); }
             catch (Throwable e) { XposedBridge.log("DevTools gate hook unavailable", e); }
         }
         XposedBridge.log("Extra UI discovery: mostVisited=" + (mostVisitedClass != null)
-                + " devToolsGate=" + installed);
+                + " devToolsGate=" + installed + " lens=" + (lensSymbols != null));
         CurrentPageCardFix.refreshAfterFaviconResolved();
     }
 
     private static synchronized void installDevTools(ClassLoader loader, String[] names)
             throws Exception {
         if (installed) return;
-        Method gate = Class.forName(names[0], false, loader).getDeclaredMethod(names[1], Context.class);
+        Class<?> gateOwner = Class.forName(names[0], false, loader);
+        Method gate = null;
+        try {gate=gateOwner.getDeclaredMethod(names[1],Context.class);}
+        catch (NoSuchMethodException missing) {
+            // R8 can inline isDevToolsAvailable into the native-policy wrapper.
+            // Scope that wrapper but never replace its return value.
+            for (Method m : gateOwner.getDeclaredMethods()) {
+                Class<?>[] p=m.getParameterTypes();
+                if (!names[1].equals(m.getName()) || p.length!=3 || p[0]!=Context.class
+                        || p[1].isPrimitive() || p[2].isPrimitive()
+                        || !Modifier.isStatic(m.getModifiers()) || m.getReturnType()!=boolean.class) continue;
+                if(gate!=null) throw new IllegalStateException("ambiguous policy wrapper");
+                gate=m;
+            }
+            if(gate==null)throw missing;
+        }
         Method tablet = Class.forName(names[2], false, loader).getDeclaredMethod(names[3], Context.class);
         if (gate.equals(tablet) || gate.getReturnType()!=boolean.class
                 || tablet.getReturnType()!=boolean.class || !Modifier.isStatic(gate.getModifiers())

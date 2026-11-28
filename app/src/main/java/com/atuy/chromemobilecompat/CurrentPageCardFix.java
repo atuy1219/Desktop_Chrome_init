@@ -719,8 +719,9 @@ final class CurrentPageCardFix {
         try {
             for (Method method : tab.getClass().getMethods()) {
                 if (method.getParameterCount() != 0 || Modifier.isStatic(method.getModifiers())
-                        || !method.getReturnType().getName().equals(
-                            "org.chromium.chrome.browser.profiles.Profile")) continue;
+                        || (!method.getReturnType().getName().equals(
+                            "org.chromium.chrome.browser.profiles.Profile")
+                            && !method.getReturnType().getName().equals(ExtraUiCompatibility.profileClass))) continue;
                 Object profile = method.invoke(tab);
                 if (profile == null) continue;
                 Boolean off = callBoolean(profile, "isOffTheRecord");

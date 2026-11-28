@@ -185,8 +185,11 @@ final class NativeClipboardSuggestion {
                 new Thread(()->{
                     android.graphics.Bitmap bitmap=ClipboardImageSupport.preview(activity,uri,edge);
                     row.post(()->{
+                        ClipDescription currentDescription=manager.getPrimaryClipDescription();
                         if(revealed[0] && previewGeneration[0]==generation && row.isAttachedToWindow()
-                                && urlBar.hasFocus() && OmniboxIcons.valid(bitmap))
+                                && urlBar.hasFocus() && activity.hasWindowFocus()
+                                && currentDescription!=null && currentDescription.getTimestamp()==stamp
+                                && OmniboxIcons.valid(bitmap))
                             OmniboxIcons.favicon(decoration,bitmap);
                     });
                 },"ChromeClipboardPreview").start();

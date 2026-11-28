@@ -67,6 +67,7 @@ final class MostVisitedFallback {
                 profileGetter=m;
             }
             if (profileGetter==null) return;
+            profileGetter.setAccessible(true);
             Object profile=profileGetter.invoke(tab);
             if (profile==null) return;
             Method observe=null, score=null;
