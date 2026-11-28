@@ -266,6 +266,7 @@ public final class ChromeInitHook implements IXposedHookLoadPackage {
         CurrentPageCardFix.install();
         Application activeChrome = getCurrentApplication();
         if (activeChrome != null) {
+            ExtraUiCompatibility.start(activeChrome, classLoader, appInfo);
             try {
                 ChromeUiDiscovery.start(activeChrome);
             } catch (Throwable t) {

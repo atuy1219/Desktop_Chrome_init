@@ -1756,5 +1756,79 @@ final class ChromeDexResolver {
         return false;
     }
 
+    // Source-defined JNI callback shapes for MostVisitedSitesBridge and
+    // DevTools' feature gate. Descriptors are discovered from the installed
+    // DEX rather than from a version-to-obfuscated-name table.
+    static String[] resolveAdditionalUi(ApplicationInfo info) throws IOException {
+        List<DexFile> files = loadApplicationDexFiles(info);
+        ArrayList<String[]> mv = new ArrayList<>();
+        ArrayList<String[]> dev = new ArrayList<>();
+        for (DexFile dex : files) {
+            boolean hasFeature = Arrays.asList(dex.strings).contains("AndroidDevToolsFrontend");
+            for (ClassDef owner : dex.classes.values()) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                boolean siteFactory = false, siteCallback = false, iconCallback = false;
+                for (MethodDef def : methods) {
+                    MethodId id = dex.methods[def.methodIndex];
+                    Proto p = dex.protos[id.protoIndex];
+                    String[] a = p.parameterDescriptors;
+                    boolean isStatic = (def.accessFlags & ACC_STATIC) != 0;
+                    if (isStatic && isObjectDescriptor(p.returnDescriptor)
+                            && Arrays.equals(a, new String[]{"Ljava/lang/String;",
+                            "Lorg/chromium/url/GURL;", INT, INT, INT})) siteFactory = true;
+                    if (!isStatic && VOID.equals(p.returnDescriptor)) {
+                        if (Arrays.equals(a, new String[]{BOOLEAN, "Ljava/util/List;"}))
+                            siteCallback = true;
+                        if (Arrays.equals(a, new String[]{"Lorg/chromium/url/GURL;"}))
+                            iconCallback = true;
+                    }
+                    if (!hasFeature || !isStatic || !BOOLEAN.equals(p.returnDescriptor)
+                            || !Arrays.equals(a, new String[]{"Landroid/content/Context;"})
+                            || !methodReferencesString(dex, def, "AndroidDevToolsFrontend")) continue;
+                    short[] code = dex.readCodeUnits(def.codeOffset);
+                    ArrayList<MethodId> candidates = new ArrayList<>();
+                    for (int i = 0; i < code.length;) {
+                        int width = instructionWidth(code, i);
+                        if (width <= 0 || i + width > code.length) break;
+                        int op = code[i] & 0xff;
+                        if (op == 0x71 || op == 0x77) {
+                            int mi = code[i + 1] & 0xffff;
+                            if (mi < dex.methods.length) {
+                                MethodId called = dex.methods[mi];
+                                Proto cp = dex.protos[called.protoIndex];
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && Arrays.equals(cp.parameterDescriptors, a)
+                                        && !called.ownerDescriptor.equals(owner.descriptor)) {
+                                    candidates.add(called);
+                                }
+                            }
+                        }
+                        i += width;
+                    }
+                    if (candidates.size() == 1) {
+                        MethodId tablet = candidates.get(0);
+                        dev.add(new String[]{descriptorToClassName(owner.descriptor), id.name,
+                                descriptorToClassName(tablet.ownerDescriptor), tablet.name});
+                    }
+                }
+                if (siteFactory && siteCallback && iconCallback) {
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ("<init>".equals(id.name) && p.parameterDescriptors.length == 1
+                                && isObjectDescriptor(p.parameterDescriptors[0])) {
+                            mv.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    descriptorToClassName(p.parameterDescriptors[0])});
+                        }
+                    }
+                }
+            }
+        }
+        String[] result = new String[6];
+        if (mv.size() == 1) System.arraycopy(mv.get(0), 0, result, 0, 2);
+        if (dev.size() == 1) System.arraycopy(dev.get(0), 0, result, 2, 4);
+        return result;
+    }
+
     private ChromeDexResolver() {}
 }

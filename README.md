@@ -2,6 +2,13 @@
 
 LSPosed compatibility module for using Desktop Chrome on Android phones with mobile Chrome UI and touch behavior while retaining desktop-only features such as extensions.
 
+## In-development compatibility fixes (version unchanged)
+
+- Clipboard image candidate: fresh single non-sensitive content URI, hidden initially, bounded background thumbnail decode only on reveal, explicit click requests Chrome's existing Lens entry point. This is not the native ClipboardProvider's default-search-engine POST route; if Lens is not available or R8 inlines its entry, the launch is unavailable. No image contents or URI are persisted or logged.
+- Most visited candidate: Chrome's own MostVisitedSitesBridge for the current confirmed regular profile; horizontal tiles, only local personal TopSites/valid local score, no independent history DB or external lookup. The NTP bridge is not identical to the Omnibox provider's ranking. Source-derived JNI callback shapes assist R8 discovery. Native tile candidate takes precedence. No incognito queries.
+- DevTools: scope the existing tablet predicate to DevToolsWindowAndroid.isDevToolsAvailable, preserving the AndroidDevToolsFrontend feature flag and native policy check. Source name or unambiguous DEX string/call signature. If R8 inlines the gate, fail closed. No global form-factor change.
+- Device validation still required; package version unchanged until a release.
+
 ## 0.5.9-native-action-size (test only)
 
 - Restore share/copy/edit artwork to mobile Chromium's intrinsic 24dp edge, centered without additional padding in the existing 48dp action columns. Applies to the native action path, overlay path and legacy card fallback.

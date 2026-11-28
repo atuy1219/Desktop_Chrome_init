@@ -33,8 +33,9 @@ final class NativeClipboardSuggestion {
         final long timestamp;
         final String text;
         final boolean url;
-        Item(long timestamp, String text, boolean url) {
-            this.timestamp = timestamp; this.text = text; this.url = url;
+        final Uri image;
+        Item(long timestamp, String text, boolean url, Uri image) {
+            this.timestamp = timestamp; this.text = text; this.url = url; this.image = image;
         }
     }
 
@@ -51,11 +52,14 @@ final class NativeClipboardSuggestion {
             boolean plain = description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)
                     || description.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML);
             boolean uriList = description.hasMimeType(ClipDescription.MIMETYPE_TEXT_URILIST);
-            if (!plain && !uriList) return null;
+            boolean imageType = description.hasMimeType("image/*");
+            if (!plain && !uriList && !imageType) return null;
             ClipData data = manager.getPrimaryClip();
             if (data == null || data.getItemCount() != 1
                     || data.getDescription().getTimestamp() != stamp) return null;
             ClipData.Item item = data.getItemAt(0);
+            if(imageType && item.getUri()!=null && "content".equals(item.getUri().getScheme()))
+                return new Item(stamp,null,false,item.getUri());
             CharSequence raw = item.getText();
             boolean uriOnly = raw == null;
             String text = raw != null ? raw.toString()
@@ -67,7 +71,7 @@ final class NativeClipboardSuggestion {
                     && uri.getHost() != null && ("http".equalsIgnoreCase(uri.getScheme())
                     || "https".equalsIgnoreCase(uri.getScheme()));
             if (uriOnly && !url) return null;
-            return new Item(stamp, url ? trimmed : text, url);
+            return new Item(stamp, url ? trimmed : text, url, null);
         } catch (Throwable e) {
             XposedBridge.log("Clipboard card: read unavailable (" + e.getClass().getSimpleName() + ")");
             return null;
@@ -90,6 +94,7 @@ final class NativeClipboardSuggestion {
         // an explicit reveal/refine action, rejecting replacements/expiry.
         final long stamp = initial.timestamp;
         final boolean url = initial.url;
+        final boolean image = initial.image != null;
         final boolean ja = "ja".equals(activity.getResources().getConfiguration()
                 .getLocales().get(0).getLanguage());
         int height = Math.max(dp(activity, 56), NativeOmniboxPageCard.dimension(
@@ -137,8 +142,8 @@ final class NativeClipboardSuggestion {
         lines.setGravity(Gravity.CENTER_VERTICAL);
         content.addView(lines, new LinearLayout.LayoutParams(0, height, 1f));
         TextView title = textLine(activity, reference.isEmpty() ? null : reference.get(0), primary, 16);
-        title.setText(ja ? (url ? "コピーしたリンク" : "コピーしたテキスト")
-                : (url ? "Copied link" : "Copied text"));
+        title.setText(ja ? (image ? "コピーした画像" : url ? "コピーしたリンク" : "コピーしたテキスト")
+                : (image ? "Copied image" : url ? "Copied link" : "Copied text"));
         lines.addView(title);
         TextView detail = textLine(activity, reference.size() > 1 ? reference.get(1) : null, secondary, 14);
         detail.setVisibility(View.GONE);
@@ -157,8 +162,13 @@ final class NativeClipboardSuggestion {
         if (foreground != 0) eye.setForeground(activity.getDrawable(foreground));
         OmniboxIcons.suggestionGlyph(eye, "ic_visibility_black", primary);
         eye.setContentDescription(ja ? "クリップボードの内容を表示" : "Reveal clipboard contents");
+        final boolean[] revealed = {false};
+        final int[] previewGeneration = {0};
         eye.setOnClickListener(v -> {
-            if (detail.getVisibility() == View.VISIBLE) {
+            if (revealed[0]) {
+                revealed[0]=false;
+                previewGeneration[0]++;
+                if(image) OmniboxIcons.suggestionGlyph(decoration,"ic_search_24dp",primary);
                 detail.setText("");
                 detail.setVisibility(View.GONE);
                 OmniboxIcons.suggestionGlyph(eye, "ic_visibility_black", primary);
@@ -167,9 +177,23 @@ final class NativeClipboardSuggestion {
             }
             Item current = read(manager);
             if (current == null || current.timestamp != stamp || current.url != url
-                    || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
-            detail.setText(current.text);
-            detail.setVisibility(View.VISIBLE);
+                    || (current.image!=null)!=image || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
+            revealed[0]=true;
+            if (image) {
+                int generation=++previewGeneration[0];
+                Uri uri=current.image;
+                new Thread(()->{
+                    android.graphics.Bitmap bitmap=ClipboardImageSupport.preview(activity,uri,edge);
+                    row.post(()->{
+                        if(revealed[0] && previewGeneration[0]==generation && row.isAttachedToWindow()
+                                && urlBar.hasFocus() && OmniboxIcons.valid(bitmap))
+                            OmniboxIcons.favicon(decoration,bitmap);
+                    });
+                },"ChromeClipboardPreview").start();
+            } else {
+                detail.setText(current.text);
+                detail.setVisibility(View.VISIBLE);
+            }
             OmniboxIcons.suggestionGlyph(eye, "ic_visibility_off_black", primary);
             eye.setContentDescription(ja ? "クリップボードの内容を非表示" : "Conceal clipboard contents");
         });
@@ -177,7 +201,9 @@ final class NativeClipboardSuggestion {
         row.setOnClickListener(v -> {
             if (!(urlBar instanceof EditText) || !urlBar.hasFocus() || !activity.hasWindowFocus()) return;
             Item current = read(manager);
-            if (current == null || current.timestamp != stamp || current.url != url) return;
+            if (current == null || current.timestamp != stamp || current.url != url
+                    || (current.image!=null)!=image) return;
+            if(image){ClipboardImageSupport.search(activity,current.image);return;}
             EditText edit = (EditText) urlBar;
             edit.setText(current.text);
             edit.setSelection(edit.length());
@@ -185,15 +211,21 @@ final class NativeClipboardSuggestion {
         // Expire revealed text and hide the entire stale row without retaining
         // clipboard content in module fields or preferences.
         row.postDelayed(() -> {
+            revealed[0]=false;
+            previewGeneration[0]++;
+            if(image)OmniboxIcons.suggestionGlyph(decoration,"ic_search_24dp",primary);
             detail.setText("");
             detail.setVisibility(View.GONE);
             row.setVisibility(View.INVISIBLE);
         }, Math.max(1L, MAX_AGE_MS - (System.currentTimeMillis() - stamp)));
         row.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) {}
-            @Override public void onViewDetachedFromWindow(View v) { detail.setText(""); }
+            @Override public void onViewDetachedFromWindow(View v) {
+                revealed[0]=false;previewGeneration[0]++;detail.setText("");
+                if(image)OmniboxIcons.suggestionGlyph(decoration,"ic_search_24dp",primary);
+            }
         });
-        XposedBridge.log("Clipboard card: shown kind=" + (url ? "URL" : "TEXT") + " (content redacted)");
+        XposedBridge.log("Clipboard card: shown kind=" + (image ? "IMAGE" : url ? "URL" : "TEXT") + " (content redacted)");
         return row;
     }
 
@@ -229,6 +261,7 @@ final class NativeClipboardSuggestion {
                 CharSequence value = text.getText();
                 if (value != null && ("コピーしたリンク".contentEquals(value)
                         || "コピーしたテキスト".contentEquals(value)
+                        || "コピーした画像".contentEquals(value) || "Copied image".contentEquals(value)
                         || "Copied link".contentEquals(value) || "Copied text".contentEquals(value)))
                     return true;
             }
