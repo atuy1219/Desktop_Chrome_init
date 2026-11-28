@@ -1756,5 +1756,229 @@ final class ChromeDexResolver {
         return false;
     }
 
+    // Source-defined JNI callback shapes for MostVisitedSitesBridge and
+    // DevTools' feature gate. Descriptors are discovered from the installed
+    // DEX rather than from a version-to-obfuscated-name table.
+    static String[] resolveAdditionalUi(ApplicationInfo info) throws IOException {
+        List<DexFile> files = loadApplicationDexFiles(info);
+        ArrayList<String[]> mv = new ArrayList<>();
+        ArrayList<String[]> dev = new ArrayList<>();
+        ArrayList<String[]> allowedDev = new ArrayList<>();
+        ArrayList<String[]> controllers = new ArrayList<>();
+        ArrayList<String[]> builders = new ArrayList<>();
+        ArrayList<String[]> passiveMv = new ArrayList<>();
+        boolean lensIntentProtocol = false;
+        final String contextType = "Landroid/content/Context;";
+        final String uriType = "Landroid/net/Uri;";
+        for (DexFile dex : files) {
+            boolean hasFeature = Arrays.asList(dex.strings).contains("AndroidDevToolsFrontend");
+            for (ClassDef owner : dex.classes.values()) {
+                List<MethodDef> methods = dex.getDefinedMethods(owner);
+                boolean siteFactory = false, siteCallback = false, iconCallback = false;
+                String siteType = null, siteCallbackName = null;
+                String singleton = null, launch = null, lensParams = null;
+                int singletonCount = 0, launchCount = 0;
+                boolean builderConstructor = false;
+                String imageSetter = null;
+                int imageSetterCount = 0;
+                for (MethodDef def : methods) {
+                    MethodId id = dex.methods[def.methodIndex];
+                    Proto p = dex.protos[id.protoIndex];
+                    String[] a = p.parameterDescriptors;
+                    boolean isStatic = (def.accessFlags & ACC_STATIC) != 0;
+                    if (isStatic && a.length == 0 && owner.descriptor.equals(p.returnDescriptor)) {
+                        singleton = id.name; singletonCount++;
+                    }
+                    if (!isStatic && VOID.equals(p.returnDescriptor) && a.length == 2
+                            && contextType.equals(a[0]) && isObjectDescriptor(a[1])) {
+                        launch = id.name; lensParams = a[1]; launchCount++;
+                    }
+                    if ("<init>".equals(id.name) && Arrays.equals(a,new String[]{INT,BOOLEAN}))
+                        builderConstructor = true;
+                    if (!isStatic && owner.descriptor.equals(p.returnDescriptor)
+                            && Arrays.equals(a,new String[]{uriType})) {
+                        imageSetter = id.name; imageSetterCount++;
+                    }
+                    if (isStatic && isObjectDescriptor(p.returnDescriptor)
+                            && Arrays.equals(a, new String[]{"Ljava/lang/String;",
+                            "Lorg/chromium/url/GURL;", INT, INT, INT})) {
+                        siteFactory = true;
+                        siteType = p.returnDescriptor;
+                    }
+                    if ("Landroid/content/Intent;".equals(p.returnDescriptor)
+                            && methodReferencesString(dex, def, "googleapp://lens")
+                            && methodReferencesString(dex, def, "LensBitmapUriKey")
+                            && methodReferencesString(dex, def, "IncognitoUriKey")
+                            && methodReferencesString(dex, def, "com.google.android.googlequicksearchbox"))
+                        lensIntentProtocol = true;
+                    if (!isStatic && VOID.equals(p.returnDescriptor)) {
+                        if (Arrays.equals(a, new String[]{BOOLEAN, "Ljava/util/List;"})) {
+                            siteCallback = true;
+                            siteCallbackName = id.name;
+                        }
+                        if (Arrays.equals(a, new String[]{"Lorg/chromium/url/GURL;"}))
+                            iconCallback = true;
+                    }
+                    boolean gateOnly = Arrays.equals(a,new String[]{contextType});
+                    boolean allowedGate = a.length == 3
+                            && (contextType.equals(a[0]) || "Landroid/app/Activity;".equals(a[0]))
+                            && "Lorg/chromium/chrome/browser/profiles/Profile;".equals(a[1])
+                            && "Lorg/chromium/content_public/browser/WebContents;".equals(a[2]);
+                    if (!hasFeature || !isStatic || !BOOLEAN.equals(p.returnDescriptor)
+                            || (!gateOnly && !allowedGate)
+                            || def.codeOffset == 0
+                            || !methodReferencesString(dex, def, "AndroidDevToolsFrontend")) continue;
+                    short[] code = dex.readCodeUnits(def.codeOffset);
+                    ArrayList<MethodId> candidates = new ArrayList<>();
+                    ArrayList<MethodId> features = new ArrayList<>();
+                    boolean nativePolicyCall = false;
+                    for (int i = 0; i < code.length;) {
+                        int width = instructionWidth(code, i);
+                        if (width <= 0 || i + width > code.length) break;
+                        int op = code[i] & 0xff;
+                        if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
+                            int mi = code[i + 1] & 0xffff;
+                            if (mi < dex.methods.length) {
+                                MethodId called = dex.methods[mi];
+                                Proto cp = dex.protos[called.protoIndex];
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && (op == 0x71 || op == 0x77)
+                                        && Arrays.equals(cp.parameterDescriptors,new String[]{contextType})
+                                        && !called.ownerDescriptor.equals(owner.descriptor)) {
+                                    candidates.add(called);
+                                }
+                                if (BOOLEAN.equals(cp.returnDescriptor)
+                                        && Arrays.equals(cp.parameterDescriptors,new String[]{"Ljava/lang/String;"}))
+                                    features.add(called);
+                                // R8 can inline the JNI adapter into the Java gate.
+                                // The shared JNI dispatch remains a boolean call with
+                                // the profile/web contents object arguments.
+                                if (BOOLEAN.equals(cp.returnDescriptor) &&
+                                        (Arrays.equals(cp.parameterDescriptors,new String[]{INT,
+                                                "Ljava/lang/Object;","Ljava/lang/Object;"})
+                                        || Arrays.equals(cp.parameterDescriptors,new String[]{
+                                                "Lorg/chromium/chrome/browser/profiles/Profile;",
+                                                "Lorg/chromium/content_public/browser/WebContents;"})))
+                                    nativePolicyCall = true;
+                            }
+                        }
+                        i += width;
+                    }
+                    if (candidates.size() == 1 && (!allowedGate || nativePolicyCall)) {
+                        MethodId tablet = candidates.get(0);
+                        MethodId feature = features.size() == 1 ? features.get(0) : null;
+                        (gateOnly ? dev : allowedDev).add(new String[]{
+                                descriptorToClassName(owner.descriptor), id.name,
+                                descriptorToClassName(tablet.ownerDescriptor), tablet.name,
+                                feature == null ? null : descriptorToClassName(feature.ownerDescriptor),
+                                feature == null ? null : feature.name});
+                    }
+                }
+                if (singletonCount == 1 && launchCount == 1) {
+                    // LensController exposes the same parameter object on the
+                    // WindowAndroid and Context launch overloads.
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ((def.accessFlags & ACC_STATIC) == 0 && VOID.equals(p.returnDescriptor)
+                                && Arrays.equals(p.parameterDescriptors,new String[]{WINDOW_ANDROID,lensParams})) {
+                            controllers.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    singleton, launch, lensParams});
+                            break;
+                        }
+                    }
+                }
+                if (builderConstructor && imageSetterCount == 1) {
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ((def.accessFlags & ACC_STATIC) == 0 && p.parameterDescriptors.length == 0
+                                && isObjectDescriptor(p.returnDescriptor)
+                                && !owner.descriptor.equals(p.returnDescriptor)) {
+                            builders.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    imageSetter,id.name,p.returnDescriptor});
+                        }
+                    }
+                }
+                if (siteFactory && siteCallback && iconCallback) {
+                    String sourceField = findSiteSourceField(files,siteType);
+                    // These methods are JNI entry points retained even when
+                    // the bridge constructor and Java observer setter disappear.
+                    if (sourceField != null && "onURLsAvailable".equals(siteCallbackName))
+                        passiveMv.add(new String[]{descriptorToClassName(owner.descriptor),
+                                siteCallbackName,descriptorToClassName(siteType),sourceField});
+                    for (MethodDef def : methods) {
+                        MethodId id = dex.methods[def.methodIndex];
+                        Proto p = dex.protos[id.protoIndex];
+                        if ("<init>".equals(id.name) && p.parameterDescriptors.length == 1
+                                && isObjectDescriptor(p.parameterDescriptors[0])) {
+                            mv.add(new String[]{descriptorToClassName(owner.descriptor),
+                                    descriptorToClassName(p.parameterDescriptors[0])});
+                        }
+                    }
+                }
+            }
+        }
+        String[] result = new String[19];
+        if (mv.size() == 1) System.arraycopy(mv.get(0), 0, result, 0, 2);
+        String[] gate = allowedDev.size() == 1 ? allowedDev.get(0)
+                : dev.size() == 1 ? dev.get(0) : null;
+        if (gate != null) {
+            System.arraycopy(gate,0,result,2,4);
+            System.arraycopy(gate,4,result,12,2);
+        }
+        ArrayList<String[]> lens = new ArrayList<>();
+        for (String[] c : controllers) for (String[] b : builders) {
+            if (c[3].equals(b[3]))
+                lens.add(new String[]{c[0],c[1],c[2],b[0],b[1],b[2]});
+        }
+        if (lens.size() == 1) System.arraycopy(lens.get(0),0,result,6,6);
+        if (passiveMv.size() == 1) System.arraycopy(passiveMv.get(0),0,result,14,4);
+        if (lensIntentProtocol) result[18] = "true";
+        com.atuy.chromemobilecompat.compat.XposedBridge.log(
+                "Extra UI resolver: dex=" + files.size() + " mostVisitedCandidates=" + mv.size()
+                + " devAvailableCandidates=" + dev.size() + " devPolicyCandidates=" + allowedDev.size()
+                + " lensControllers=" + controllers.size() + " lensBuilders=" + builders.size()
+                + " lensPairs=" + lens.size() + " mostVisitedCallback=" + passiveMv.size()
+                + " lensIntentProtocol=" + lensIntentProtocol);
+        return result;
+    }
+
+    // SiteSuggestion(String title, GURL url, int titleSource, int source, int section):
+    // recover the source field from the constructor's incoming register.
+    // No hardcoded field name or numeric resource/method index.
+    private static String findSiteSourceField(List<DexFile> files, String type) {
+        if (type == null) return null;
+        ArrayList<String> matches = new ArrayList<>();
+        for (DexFile dex : files) {
+            ClassDef owner = dex.classes.get(type);
+            if (owner == null) continue;
+            for (MethodDef def : dex.getDefinedMethods(owner)) {
+                MethodId id = dex.methods[def.methodIndex];
+                Proto p = dex.protos[id.protoIndex];
+                if (!"<init>".equals(id.name) || def.codeOffset == 0
+                        || !Arrays.equals(p.parameterDescriptors,new String[]{
+                        "Ljava/lang/String;","Lorg/chromium/url/GURL;",INT,INT,INT})) continue;
+                int receiver = dex.readUShort(def.codeOffset)-dex.readUShort(def.codeOffset+2);
+                int source = receiver+4;
+                short[] code = dex.readCodeUnits(def.codeOffset);
+                for (int i=0;i<code.length;) {
+                    int w=instructionWidth(code,i);
+                    if(w<=0 || i+w>code.length)break;
+                    int unit=code[i]&0xffff;
+                    if((unit&255)==0x59 && ((unit>>>8)&15)==source
+                            && ((unit>>>12)&15)==receiver) {
+                        int field=code[i+1]&0xffff;
+                        if(field<dex.fields.length && type.equals(dex.fields[field].ownerDescriptor)
+                                && INT.equals(dex.fields[field].typeDescriptor))
+                            matches.add(dex.fields[field].name);
+                    }
+                    i+=w;
+                }
+            }
+        }
+        return matches.size()==1?matches.get(0):null;
+    }
+
     private ChromeDexResolver() {}
 }

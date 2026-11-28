@@ -192,8 +192,18 @@ final class ChromeUiDiscovery {
         requestTabFavicon(tab, loader, result);
     }
 
+    static void requestSiteFavicon(Object tab, ClassLoader loader, Object gurl,
+            int size, Consumer<Bitmap> result) {
+        requestLocalFavicon(tab, loader, gurl, size, result, false);
+    }
+
     private static boolean requestLocalFavicon(Object tab, ClassLoader loader, Object gurl,
             int size, Consumer<Bitmap> result) {
+        return requestLocalFavicon(tab, loader, gurl, size, result, true);
+    }
+
+    private static boolean requestLocalFavicon(Object tab, ClassLoader loader, Object gurl,
+            int size, Consumer<Bitmap> result, boolean useTabFallback) {
         if (gurl == null) return false;
         Object helper = null;
         Method cleanup = null;
@@ -267,7 +277,7 @@ final class ChromeUiDiscovery {
                             if (finished.get()) return;
                             release.run();
                             if (OmniboxIcons.valid(image)) result.accept(image);
-                            else requestTabFavicon(tab, loader, result);
+                            else if (useTabFallback) requestTabFavicon(tab, loader, result);
                         });
                         return null;
                     });

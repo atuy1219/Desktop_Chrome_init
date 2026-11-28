@@ -80,6 +80,7 @@ final class CurrentPageCardFix {
         FrameLayout suggestionContainer;
         ViewGroup card;
         ViewGroup clipboardCard;
+        LinearLayout mostVisited;
         ImageView pageIcon;
         int baselineTopPadding;
         int cardHeight;
@@ -226,15 +227,11 @@ final class CurrentPageCardFix {
             return;
         }
 
-        if (nativePageCardPresent((ViewGroup) dropdown)) {
-            XposedBridge.log("Current-page card: native candidate already present; skipped");
-            return;
-        }
+        boolean nativePage = nativePageCardPresent((ViewGroup) dropdown);
         Page page = findPage(activity, session.displayBeforeFocus);
-        if (page == null) {
-            XposedBridge.log("Current-page card: no verified active-tab HTTP URL; skipped");
-            return;
-        }
+        final Object activeTab = page != null ? page.tab : findActiveTab(activity);
+        final Boolean offTheRecord = page != null ? page.offTheRecord : verifiedOffTheRecord(activeTab);
+        if (page == null && !Boolean.FALSE.equals(offTheRecord)) return;
 
         try {
             session.dropdown = (ViewGroup) dropdown;
@@ -244,6 +241,10 @@ final class CurrentPageCardFix {
                     activity, "omnibox_suggestion_side_spacing_smallest", 8);
             final int nativeRowWidth = Math.max(
                     dp(activity, 140), dropdown.getWidth() - 2 * sideSpacing);
+            LinearLayout cardGroup = new LinearLayout(activity);
+            cardGroup.setOrientation(LinearLayout.VERTICAL);
+            cardGroup.setClipChildren(false);
+            if (page != null && !nativePage) {
             NativeOmniboxPageCard.RenderedCard rendered = NativeOmniboxPageCard.build(
                     activity, (ViewGroup) dropdown,
                     page.title, page.url, page.favicon, session.urlBar,
@@ -262,39 +263,38 @@ final class CurrentPageCardFix {
                 XposedBridge.log("Current-page card: native row unavailable; "
                         + "styled fallback based on Chrome's own suggestion row");
             }
-            // An actual Chromium clipboard suggestion is already handled by
-            // the normal RecyclerView. Only supply a native-view fallback when
-            // a recent URL is missing and this is a verified regular tab.
+                if (session.card != null) cardGroup.addView(session.card,
+                        new LinearLayout.LayoutParams(-1,-2));
+            }
             ViewGroup clipboardCard = NativeClipboardSuggestion.maybeBuild(
-                    activity, (ViewGroup) dropdown, session.urlBar,
-                    page.offTheRecord);
+                    activity, (ViewGroup) dropdown, session.urlBar, offTheRecord);
             session.clipboardCard = clipboardCard;
             if (clipboardCard != null) {
-                LinearLayout cardGroup = new LinearLayout(activity);
-                cardGroup.setOrientation(LinearLayout.VERTICAL);
-                cardGroup.setClipChildren(false);
-                cardGroup.addView(session.card, new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT));
-                LinearLayout.LayoutParams clipboardParams =
-                        new LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.WRAP_CONTENT);
-                clipboardParams.topMargin = dp(activity, 12);
-                cardGroup.addView(clipboardCard, clipboardParams);
-                session.card = cardGroup;
+                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1,-2);
+                cp.topMargin = cardGroup.getChildCount() == 0 ? 0 : dp(activity,12);
+                cardGroup.addView(clipboardCard,cp);
             }
+            if (Boolean.FALSE.equals(offTheRecord) && !MostVisitedFallback.nativePresent(session.dropdown)) {
+                session.mostVisited = new LinearLayout(activity);
+                session.mostVisited.setOrientation(LinearLayout.VERTICAL);
+                session.mostVisited.setVisibility(View.GONE);
+                LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);
+                mp.topMargin=cardGroup.getChildCount()==0?0:dp(activity,12);
+                cardGroup.addView(session.mostVisited,mp);
+            }
+            session.card = cardGroup;
+            if(cardGroup.getChildCount()==0){removeCard(session);return;}
             session.card.measure(
                     View.MeasureSpec.makeMeasureSpec(nativeRowWidth,
                             View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             session.cardHeight = session.card.getMeasuredHeight();
-            if (session.cardHeight <= 0) {
-                session.card = null;
+            if (session.cardHeight <= 0 && session.mostVisited == null) {
+                removeCard(session);
                 return;
             }
             final int afterCardSpacing = dp(activity, 12);
-            session.reservedHeight = session.cardHeight + afterCardSpacing;
+            session.reservedHeight = session.cardHeight == 0 ? 0 : session.cardHeight + afterCardSpacing;
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     nativeRowWidth, session.cardHeight, Gravity.TOP | Gravity.START);
             lp.leftMargin = sideSpacing;
@@ -309,8 +309,8 @@ final class CurrentPageCardFix {
             session.card.bringToFront();
             // Start async favicon work after the actual row is attached.
             XposedBridge.log("Current-page favicon: initialBitmap="
-                    + OmniboxIcons.valid(page.favicon) + " target=" + (session.pageIcon != null));
-            if (session.pageIcon != null && !OmniboxIcons.valid(page.favicon)) {
+                    + (page != null && OmniboxIcons.valid(page.favicon)) + " target=" + (session.pageIcon != null));
+            if (page != null && session.pageIcon != null && !OmniboxIcons.valid(page.favicon)) {
                 requestPageFavicon(session, activity, page, session.pageIcon);
             }
 
@@ -322,9 +322,16 @@ final class CurrentPageCardFix {
             session.layoutObserver = () -> {
                 if (session.card == null || session.dropdown == null
                         || !session.urlBar.hasFocus()) return true;
-                if (nativePageCardPresent(session.dropdown)) {
+                if (session.pageIcon != null && nativePageCardPresent(session.dropdown)) {
                     removeCard(session);
+                    session.urlBar.post(() -> tryShow(session,0));
                     return true;
+                }
+                if (session.mostVisited != null && session.mostVisited.getVisibility()==View.VISIBLE
+                        && MostVisitedFallback.nativePresent(session.dropdown)) {
+                    session.mostVisited.removeAllViews();
+                    session.mostVisited.setVisibility(View.GONE);
+                    resizeCard(session,activity,nativeRowWidth);
                 }
                 if (session.clipboardCard != null
                         && NativeClipboardSuggestion.nativeClipboardPresent(session.dropdown)) {
@@ -361,12 +368,39 @@ final class CurrentPageCardFix {
             session.dropdown.getViewTreeObserver()
                     .addOnPreDrawListener(session.layoutObserver);
             session.suggestionContainer.requestLayout();
+            if (session.mostVisited != null) {
+                final LinearLayout target = session.mostVisited;
+                MostVisitedFallback.request(activity,session.dropdown,activeTab,bar,target,
+                        () -> SESSIONS.get(bar)==session && bar.hasFocus()
+                                && TextUtils.isEmpty(bar.getText())
+                                && session.mostVisited==target
+                                && findActiveTab(activity)==activeTab
+                                && Boolean.FALSE.equals(verifiedOffTheRecord(activeTab)),
+                        () -> resizeCard(session,activity,nativeRowWidth));
+            }
             XposedBridge.log("Current-page card: shown, heightPx=" + session.cardHeight
                     + " (URL from active Chrome tab)");
         } catch (Throwable e) {
             XposedBridge.log("Current-page card insertion failed", e);
             removeCard(session);
         }
+    }
+
+    private static void resizeCard(CardSession session,Activity activity,int width) {
+        if(session.card==null || session.dropdown==null || !session.urlBar.hasFocus())return;
+        session.card.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        int height=session.card.getMeasuredHeight();
+        int actual=session.dropdown.getPaddingTop();
+        if(actual != session.baselineTopPadding+session.reservedHeight && actual<session.reservedHeight)
+            session.baselineTopPadding=actual;
+        session.cardHeight=height;
+        session.reservedHeight=height==0?0:height+dp(activity,12);
+        ViewGroup.LayoutParams lp=session.card.getLayoutParams();
+        if(lp!=null){lp.height=height;session.card.setLayoutParams(lp);}
+        session.dropdown.setPaddingRelative(session.dropdown.getPaddingStart(),
+                session.baselineTopPadding+session.reservedHeight,
+                session.dropdown.getPaddingEnd(),session.dropdown.getPaddingBottom());
     }
 
     private static LinearLayout buildCard(Activity activity, CardSession session, Page page) {
@@ -641,7 +675,7 @@ final class CurrentPageCardFix {
         return null;
     }
 
-    private static String getGurlSpec(Object gurl) {
+    static String getGurlSpec(Object gurl) {
         if (gurl == null) return null;
         try {
             Method method = gurl.getClass().getMethod("getSpec");
@@ -664,7 +698,7 @@ final class CurrentPageCardFix {
         return null;
     }
 
-    private static boolean validUrl(String url) {
+    static boolean validUrl(String url) {
         if (url == null || url.length() < 10) return false;
         try {
             Uri uri = Uri.parse(url);
@@ -685,8 +719,9 @@ final class CurrentPageCardFix {
         try {
             for (Method method : tab.getClass().getMethods()) {
                 if (method.getParameterCount() != 0 || Modifier.isStatic(method.getModifiers())
-                        || !method.getReturnType().getName().equals(
-                            "org.chromium.chrome.browser.profiles.Profile")) continue;
+                        || (!method.getReturnType().getName().equals(
+                            "org.chromium.chrome.browser.profiles.Profile")
+                            && !method.getReturnType().getName().equals(ExtraUiCompatibility.profileClass))) continue;
                 Object profile = method.invoke(tab);
                 if (profile == null) continue;
                 Boolean off = callBoolean(profile, "isOffTheRecord");
@@ -766,6 +801,7 @@ final class CurrentPageCardFix {
         session.card = null;
         session.pageIcon = null;
         session.clipboardCard = null;
+        session.mostVisited = null;
         session.dropdown = null;
         session.suggestionContainer = null;
         session.cardHeight = 0;
